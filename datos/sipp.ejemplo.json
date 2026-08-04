@@ -1,0 +1,63 @@
+{
+  "_nota": [
+    "PLANTILLA. Copia este archivo como 'datos/sipp.json' y rellénalo con los",
+    "valores reales del portal. El archivo real NO se versiona: el repositorio",
+    "es público y el mapa de selectores describe la estructura interna del ERP.",
+    "",
+    "Cómo obtenerlo:",
+    "  - Desarrollo: pídelo a quien mantenga el proyecto.",
+    "  - Instalador: el CI lo escribe desde el secreto SIPP_DATOS_JSON.",
+    "  - Parche puntual: colócalo en la carpeta de datos del usuario y gana",
+    "    sobre el empaquetado (ver core/sipp_datos.py).",
+    "",
+    "Los selectores llevan 'primario' y 'respaldos': se prueban en ese orden.",
+    "Ojo con dos cosas al llenarlo (ver ESPECIFICACION.md §8): varios ids están",
+    "DUPLICADOS entre los paneles de Proveedor/Deudor/Acreedor —por eso existe",
+    "'paneles_beneficiario'—, y algunos elementos aparecen varias veces en el",
+    "DOM con solo uno visible, en cuyo caso hace falta el filtro ':visible'."
+  ],
+
+  "ambientes": {
+    "PRUEBAS": "https://ejemplo-pruebas.invalid/login.html",
+    "PRODUCCION": "https://ejemplo-produccion.invalid/login.html"
+  },
+
+  "paneles_beneficiario": "div.row[ng-show*='CAMPO_TIPO == {}']",
+
+  "pestanas": {
+    "documentos": "Documentos Respaldo",
+    "insumos": "Insumos & Servicios",
+    "conceptos": "Conceptos de Pago"
+  },
+
+  "selectores": {
+    "login.usuario": {
+      "primario": "#idDelCampoUsuario",
+      "respaldos": ["input[ng-model='modeloUsuario']"]
+    },
+    "login.contrasena": {
+      "primario": "input[ng-model='modeloContrasena']",
+      "respaldos": []
+    },
+    "login.entrar": {
+      "primario": "#idDelBotonEntrar",
+      "respaldos": []
+    },
+
+    "_comentario_resto": {
+      "primario": "",
+      "respaldos": [
+        "El archivo real trae ~77 claves más, agrupadas por prefijo:",
+        "sesion.* (configuración de empresa y plaza)",
+        "listado.* (búsqueda y acciones de la rejilla)",
+        "sol.*     (encabezado y datos generales del formulario)",
+        "ben.*     (beneficiario y su buscador)",
+        "cb.*      (modal de cuenta bancaria)",
+        "ins.* y cc.* (insumos y centros de costo)",
+        "con.*     (grid de conceptos de pago)",
+        "acc.* y doc.* (guardar, autorizar, documentos de respaldo)",
+        "alerta.*  (avisos emergentes)"
+      ]
+    }
+  }
+}

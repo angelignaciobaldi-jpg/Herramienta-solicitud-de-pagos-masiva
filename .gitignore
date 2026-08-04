@@ -1,0 +1,100 @@
+# =========================================================================
+#  Qué NO se sube al repositorio
+#
+#  Tres criterios, en orden de importancia:
+#    1. SECRETOS — credenciales y sesiones. Que estén cifrados con DPAPI no
+#       los vuelve publicables.
+#    2. DATOS REALES — de personas y del negocio: CLABEs, RFC, nombres,
+#       carátulas bancarias, capturas del portal. Este repositorio es privado,
+#       pero un repositorio privado sigue siendo un lugar del que la
+#       información ya no se puede retirar.
+#    3. GENERADOS — lo que se vuelve a producir solo: build, caché, base de
+#       datos local, evidencias.
+#
+#  Regla práctica: si el archivo se crea al USAR la herramienta, no va.
+#  Si se crea al PROGRAMARLA, va.
+# =========================================================================
+
+# ----- 1. SECRETOS -------------------------------------------------------
+# Credenciales del SIPP, cifradas por usuario con DPAPI.
+credenciales_rpa.json
+# Cookies de la sesión de SIPP: dan acceso al ERP a quien las tenga.
+storage_state.json
+# Variables de entorno con el PAT de GitHub. El .env.example SÍ va.
+.env
+# Tokens de servicios.
+token_api.json
+
+# Integración con SIPP: mapa de selectores y URLs del portal. No son
+# credenciales, pero juntos describen la estructura interna de un sistema
+# financiero, y este repositorio es PÚBLICO. La herramienta lo lee al arrancar;
+# el instalador lo recibe del secreto SIPP_DATOS_JSON en el CI.
+# `datos/sipp.ejemplo.json` sí se versiona: documenta la estructura.
+datos/sipp.json
+
+# ----- 2. DATOS REALES ---------------------------------------------------
+# Páginas guardadas del portal: traen datos de operaciones reales en su DOM.
+Paginas html/
+HTML PAGES/
+# Carátulas bancarias y Vo.Bo.: CLABEs y nombres de personas.
+CARATULAS/
+VOBO/
+caratulas_prueba/
+# Capturas de pantalla del portal, con lo que hubiera en la sesión.
+evidencias/
+_diagnostico_rpa/
+logs/
+# Plantillas y bases del área. La plantilla en blanco se GENERA desde la
+# herramienta, así que no hace falta versionar ningún .xlsx.
+*.xlsx
+*.xlsm
+*.xls
+*.csv
+# Documentos sueltos de prueba.
+Documentos de pruebas/
+descargas/
+
+# ----- 3. GENERADOS ------------------------------------------------------
+# Base de datos local del usuario.
+*.db
+*.db-journal
+*.db-wal
+# Preferencias por máquina: ventana, tema, ambiente.
+preferencias.json
+# Estado del auto-updater.
+actualizador_estado.json
+# Parche en caliente del mapa de selectores (se crea en DATOS).
+selectores.json
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+
+# Empaquetado: flet pack / PyInstaller / Inno Setup
+build/
+dist/
+*.spec
+Output/
+# Motor de OCR empaquetado por el CI (pesado).
+tesseract_bundle/
+tessdata/
+# Navegador de Playwright, descargado en el primer uso.
+ms-playwright/
+
+# Editores y sistema
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+desktop.ini
+$RECYCLE.BIN/
+
+# ----- Excepciones -------------------------------------------------------
+# Lo que sí queremos, aunque una regla de arriba lo atrape.
+!.env.example
+!Imagenes/
+!.github/
