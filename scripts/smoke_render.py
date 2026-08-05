@@ -207,9 +207,71 @@ async def _principal(page: ft.Page) -> None:
             page.update()
             await asyncio.sleep(0.5)
             captura.modal.cerrar()
-            _ok("modal Captura de solicitud")
+            _ok("modal Captura de solicitud (alta)")
         except Exception as exc:  # noqa: BLE001
-            _falla("modal Captura de solicitud", exc)
+            _falla("modal Captura de solicitud (alta)", exc)
+
+        # EDICIÓN, y con archivos adjuntos. Abrirlo vacío no basta: hay ramas que
+        # solo se ejecutan cuando la solicitud ya trae carátula o Vo.Bo., y ahí
+        # se escondía un `NameError` que el alta nunca tocaba.
+        try:
+            import tempfile
+
+            from core import documentos
+            from core.db import CONCEPTO, Partida, Solicitud
+            from ui.captura_solicitud import CapturaSolicitud
+
+            # Se REUSA la de una corrida anterior si existe. El smoke trabaja
+            # contra la base real de desarrollo, y crear siempre una solicitud
+            # nueva chocaría con la clave de idempotencia la segunda vez: un
+            # smoke que solo pasa la primera vez no sirve de nada.
+            NOMBRE_PRUEBA = "PRUEBA DE RENDER"
+            solicitud = next(
+                (s for s in db.listar_solicitudes(lote_id)
+                 if s.beneficiario_nombre == NOMBRE_PRUEBA), None)
+            if solicitud is None:
+                solicitud = Solicitud(
+                    lote_id=lote_id, empresa="Aske", sucursal="Corporativo",
+                    tipo_beneficiario="Acreedor",
+                    beneficiario_nombre=NOMBRE_PRUEBA,
+                    beneficiario_rfc="XAXX010101000",
+                    beneficiario_correo="x@ejemplo.invalid",
+                    cuenta_clabe="012345678901234567", cuenta_banco="BBVA",
+                    forma_pago="Transferencia", tipo_gasto="No Deducible",
+                    fecha_pago="20/09/2026", descripcion="Prueba de render")
+                solicitud = db.guardar_solicitud(
+                    solicitud, [Partida(clase=CONCEPTO,
+                                        concepto_nombre="PRUEBA",
+                                        importe=1000.0)])
+
+            # Dos archivos de mentira, solo para que existan en disco.
+            carpeta = tempfile.mkdtemp()
+            adjuntos = []
+            for tipo, nombre in ((documentos.TIPO_CARATULA, "caratula.pdf"),
+                                 (documentos.TIPO_VOBO, "vobo.pdf")):
+                ruta_pdf = os.path.join(carpeta, nombre)
+                with open(ruta_pdf, "wb") as fh:
+                    fh.write(b"%PDF-1.4\n")
+                documentos.registrar(solicitud.id, ruta_pdf, tipo, lote_id)
+                adjuntos.append(nombre)
+
+            captura2 = CapturaSolicitud(app_obj, lambda *_a: None)
+            captura2.abrir(lote_id, solicitud, db.listar_partidas(solicitud.id))
+            page.update()
+            await asyncio.sleep(0.5)
+            # Y que de verdad los muestre: si la rama no se ejecutó, no sirvió.
+            visto = (captura2.txt_caratula.value or "")
+            if "caratula.pdf" not in visto:
+                raise AssertionError(
+                    f"el modal no mostró la carátula adjunta (dice «{visto}»)")
+            captura2.modal.cerrar()
+            _ok(f"modal Captura de solicitud (edición con {len(adjuntos)} "
+                f"adjunto(s))")
+            # Se limpia lo que creó: el smoke no debe dejar basura en la base
+            # de desarrollo del usuario.
+            db.borrar_solicitud(solicitud.id)
+        except Exception as exc:  # noqa: BLE001
+            _falla("modal Captura de solicitud (edición con adjuntos)", exc)
 
         try:
             from ui.carga_masiva import CargaMasiva

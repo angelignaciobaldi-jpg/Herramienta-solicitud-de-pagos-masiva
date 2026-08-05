@@ -22,7 +22,7 @@ from core.catalogos import (FORMA_PAGO_CON_CUENTA, FORMAS_PAGO, MONEDAS,
                             TIPO_PAGO_SOPORTADO, clase_desglose)
 from core.db import CONCEPTO, INSUMO, Partida, Solicitud
 from core.empresas import NOMBRES_EMPRESAS
-from ui.comun import GRIS, NARANJA, ROJO, fmt_importe, parse_importe
+from ui.comun import GRIS, NARANJA, ROJO, VERDE, fmt_importe, parse_importe
 from ui.componentes import (CampoFecha, Modal, boton_herramienta,
                             boton_primario, boton_secundario, campo_opciones,
                             campo_texto, seccion_formulario)
