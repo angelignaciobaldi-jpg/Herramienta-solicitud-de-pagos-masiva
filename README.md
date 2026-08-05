@@ -26,10 +26,23 @@ python app.py
 Verificación de que nada quedó roto:
 
 ```powershell
+python scripts/probar.py              # las pruebas de lógica (lo primero que corres)
 python scripts/smoke_import.py        # imports (lo exige el CI)
 python scripts/smoke_render.py        # abre la app y pinta cada pantalla
 python scripts/prueba_rpa_fixtures.py # el mapa de selectores vs. las páginas reales
 ```
+
+`probar.py` corre las suites de [scripts/pruebas/](scripts/pruebas/) —datos,
+ingesta, catálogo, asignación e interfaz— sin abrir ventana ni tocar SIPP, con
+una base temporal por prueba. Acepta un filtro por nombre y `-v` para ver el
+detalle de las que fallen:
+
+```powershell
+python scripts/probar.py asignacion -v
+```
+
+Cubren la lógica, no el dibujado: que la pantalla se vea es trabajo de
+`smoke_render.py`, y que el robot haga lo que dice, de las pruebas contra stage.
 
 Contra el SIPP de pruebas (leen, no capturan):
 
@@ -43,7 +56,7 @@ python scripts/importar_conceptos.py    # siembra el catálogo de conceptos
 en pruebas. Úsalo solo cuando quieras revalidar el guardado completo y la
 salvaguarda de idempotencia.
 
-Corre **los tres primeros** antes de publicar. El de imports no basta, porque un control
+Corre **los cuatro** antes de publicar. El de imports no basta, porque un control
 se construye sin quejarse en Python y aun así puede fallar más tarde, de dos
 formas que no dejan rastro en la consola:
 
@@ -86,6 +99,9 @@ ui/               Una pantalla por archivo; cada una expone `.contenido`
   documentos.py   (fase 3) ingesta de CFDI / Excel / anexos
   bitacora.py     Historial y evidencias
   configuracion.py  Modal de configuración
+scripts/          Verificación y utilidades
+  probar.py       Corredor de las pruebas de lógica
+  pruebas/        Las suites: datos · ingesta · catálogo · asignación · interfaz
 ```
 
 Los datos en runtime (base, preferencias, credenciales, navegador) **nunca** se
