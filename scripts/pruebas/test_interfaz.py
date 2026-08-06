@@ -439,6 +439,78 @@ def probar_bitacora_filtra_por_nivel():
     assert "1 registro" in pantalla.txt_resumen.value
 
 
+def probar_buscar_en_el_catalogo_de_conceptos():
+    """el buscador filtra sin acentos, por palabras sueltas y en cualquier orden"""
+    from ui.conceptos import SeccionConceptos
+
+    conceptos.importar(["ISR RETENCIONES POR SALARIOS", "PREVISION OBRERA",
+                        "PREVISION PATRONAL", "VIGILANCIA"], "Abastecedora")
+    app = comun.AppFalsa()
+    pantalla = SeccionConceptos(app)
+    pantalla.cargar_desde_db()
+    assert "4 concepto(s)" in pantalla.txt_estado.value
+    assert not pantalla.btn_limpiar.visible
+
+    def buscar(texto):
+        pantalla.tf_buscar.value = texto
+        pantalla._cambiar_filtro()
+        return [c.nombre for c in pantalla._conceptos
+                if pantalla._coincide(c)]
+
+    assert buscar("prevision") == ["PREVISION OBRERA", "PREVISION PATRONAL"]
+    assert buscar("previsión") == ["PREVISION OBRERA", "PREVISION PATRONAL"], (
+        "el acento no debe cambiar el resultado")
+    assert buscar("salarios isr") == ["ISR RETENCIONES POR SALARIOS"], (
+        "las palabras van sueltas y en cualquier orden")
+
+    buscar("prevision")
+    assert "2 de 4 concepto(s)" in pantalla.txt_estado.value, (
+        "el total tiene que seguir a la vista al filtrar")
+    assert pantalla.btn_limpiar.visible
+
+
+def probar_buscar_sin_resultados_no_invita_a_importar():
+    """el vacío por filtro se distingue del catálogo vacío"""
+    # Con un solo mensaje, no encontrar «vigilancia» invitaría a importar de
+    # SIPP un catálogo que ya está completo, o a darla de alta a mano duplicada.
+    from ui.conceptos import SeccionConceptos
+
+    app = comun.AppFalsa()
+    pantalla = SeccionConceptos(app)
+    pantalla.cargar_desde_db()
+    assert pantalla.vacio.visible and not pantalla.sin_resultados.visible
+
+    conceptos.importar(["VIGILANCIA"], "Abastecedora")
+    pantalla.tf_buscar.value = "no existe"
+    pantalla._cambiar_filtro()
+    assert pantalla.sin_resultados.visible
+    assert not pantalla.vacio.visible
+    assert not pantalla.tabla.control.visible
+
+    pantalla._limpiar_filtro()
+    assert pantalla.tabla.control.visible
+    assert not pantalla.sin_resultados.visible
+    assert not pantalla.btn_limpiar.visible
+
+
+def probar_el_alta_deja_ver_el_concepto_nuevo():
+    """agregar con una búsqueda puesta no esconde lo recién agregado"""
+    from ui.conceptos import SeccionConceptos
+
+    conceptos.importar(["VIGILANCIA"], "Abastecedora")
+    app = comun.AppFalsa()
+    pantalla = SeccionConceptos(app)
+    pantalla.cargar_desde_db()
+    pantalla.tf_buscar.value = "vigilancia"
+    pantalla._cambiar_filtro()
+
+    pantalla._abrir_alta()
+    pantalla.tf_nombre.value = "FLETES FORANEOS"
+    pantalla._guardar_alta()
+    assert not pantalla.tf_buscar.value, "la búsqueda debe quedar limpia"
+    assert "2 concepto(s)" in pantalla.txt_estado.value
+
+
 def probar_alta_manual_de_concepto_avisa_de_soporte():
     """al crear un concepto a mano se advierte que puede no existir en SIPP"""
     from ui.conceptos import SeccionConceptos
