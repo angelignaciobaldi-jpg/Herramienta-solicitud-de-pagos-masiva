@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 from core import (catalogos, db, documentos, dpapi, rutas, selectores,
-                  sipp_datos)
+                  sipp_datos, validador)
 from core.db import CONCEPTO, INSUMO, Partida, Solicitud
 
 # Carpetas de trabajo, siempre dentro de DATOS (nunca junto al .exe).
@@ -1575,6 +1575,11 @@ def procesar_lote(lote_id: str, usuario: str, contrasena: str, *,
     Una solicitud a la vez, un contexto de navegador, sin paralelismo: SIPP
     mantiene una sola sesión por usuario y dos capturas simultáneas se pisan.
 
+    Antes de abrir el navegador se validan todas: las que traen datos
+    incompletos quedan en REVISAR con el motivo y no se intentan. Es el único
+    punto por el que se pasa a fuerza antes del portal, así que es aquí donde
+    esa regla se hace cumplir, y no en cada pantalla que edita una solicitud.
+
     Cada transición se persiste ANTES de ejecutar el paso siguiente, para que un
     corte a media captura deje la base contando la verdad.
     """
@@ -1600,6 +1605,31 @@ def procesar_lote(lote_id: str, usuario: str, contrasena: str, *,
         return lambda paso, msg, nivel, captura: db.registrar(
             sid, paso, msg, nivel, captura)
 
+    # Última puerta antes de tocar SIPP. Una solicitud con datos incompletos no
+    # se intenta siquiera: fallaría a media captura y puede dejar el
+    # beneficiario a medio dar de alta en el ERP, que después hay que limpiar a
+    # mano. Es también lo que permite que la asignación masiva se aplique sin
+    # tener que estar completa: la regla se hace cumplir aquí, en el único punto
+    # por el que se pasa obligatoriamente antes del portal.
+    partidas_de: dict[str, list[Partida]] = {}
+    for s in pendientes:
+        partidas = db.listar_partidas(s.id)
+        errores = [h for h in validador.validar(s, partidas) if h.es_error]
+        if not errores:
+            partidas_de[s.id] = partidas
+            continue
+        motivo = validador.resumen(errores)
+        db.actualizar_estado(s.id, "REVISAR", error_msg=motivo)
+        db.registrar(s.id, "validar",
+                     f"No se capturó por datos incompletos:\n{motivo}", "WARN")
+        resumen["revisar"] += 1
+        resumen["detalle"].append(
+            f"{s.beneficiario_nombre}: datos incompletos, no se intentó.")
+
+    # Si no queda ninguna capturable, ni se abre el navegador.
+    if not partidas_de:
+        return resumen
+
     with SesionSipp(url_login, visible=visible) as sesion:
         sesion.login(usuario, contrasena)
         sesion.configurar_sesion(empresa_sesion, sucursal_sesion)
@@ -1610,11 +1640,18 @@ def procesar_lote(lote_id: str, usuario: str, contrasena: str, *,
             if cancelado():
                 resumen["cancelado"] = True
                 break
+            # Ya quedó en REVISAR arriba; se avisa igual para que la barra
+            # avance y el usuario vea por qué se saltó.
+            if solicitud.id not in partidas_de:
+                avisar(i=i, total=total, nombre=solicitud.beneficiario_nombre,
+                       estado="revisar",
+                       mensaje="Datos incompletos; no se intentó capturar.")
+                continue
             sesion._on_bitacora = bitacora(solicitud.id)
             avisar(i=i, total=total, nombre=solicitud.beneficiario_nombre,
                    estado="procesando")
             db.actualizar_estado(solicitud.id, "EN_CAPTURA", sumar_intento=True)
-            partidas = db.listar_partidas(solicitud.id)
+            partidas = partidas_de[solicitud.id]
             # Por defecto, los archivos que el usuario ya asoció a la solicitud.
             # SIPP exige la carátula para dar de alta una cuenta bancaria, así
             # que sin ella el alta del beneficiario queda a medias.

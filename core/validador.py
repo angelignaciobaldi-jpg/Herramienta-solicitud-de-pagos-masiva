@@ -1,9 +1,16 @@
 """Validaciones previas a encolar una solicitud (ESPECIFICACION.md §7).
 
-Se ejecutan al capturar, al importar y al editar en la tabla. Regla de oro: el
-modal de asignación masiva usa ESTE mismo validador. No debe existir un camino
-corto que lo evite, porque un lote se lanza sin supervisión y un dato malo se
-convierte en una solicitud mal capturada en el ERP.
+Se ejecutan al capturar, al importar y al editar en la tabla. Regla de oro: no
+existe un camino que llegue a SIPP sin pasar por aquí. Un lote se lanza sin
+supervisión y un dato malo se convierte en una solicitud mal capturada en el ERP.
+
+Dónde se hace cumplir importa. La puerta que de verdad cierra es
+`rpa_sipp.procesar_lote`, que valida todo el lote antes de abrir el navegador y
+manda a REVISAR lo que esté incompleto. Las pantallas que editan una solicitud
+usan el validador para AVISAR, y solo bloquean por lo que ellas mismas escriben:
+la asignación masiva, por ejemplo, no se niega a poner un concepto porque falte
+la CLABE —un campo que ese modal ni toca ni puede corregir—, porque eso dejaría
+al usuario sin salida sin evitar ningún riesgo.
 
 Aquí solo viven las reglas que se pueden comprobar **sin abrir SIPP**. Las que
 requieren consultar catálogos en vivo —que el beneficiario exista, que el

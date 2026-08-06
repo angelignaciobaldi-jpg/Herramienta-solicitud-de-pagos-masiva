@@ -9,6 +9,12 @@ La clase del renglón no se elige aquí: la impone el tipo de beneficiario de ca
 solicitud, como en el resto de la herramienta. Por eso el formulario habla de
 «concepto o insumo» y muestra los campos de centro de costos solo cuando hay
 proveedores en el alcance.
+
+La vista previa distingue TRES estados, no dos. Que a una solicitud le falte la
+CLABE no impide asignarle su concepto: son cosas distintas, y este modal no
+permite corregir la CLABE, así que bloquear por ella solo dejaría al usuario sin
+salida. Se aplica, se dice que sigue incompleta, y quien se niega a capturarla
+es el motor.
 """
 
 from __future__ import annotations
@@ -205,10 +211,15 @@ class AsignacionMasiva:
 
         filas = []
         for c in plan.cambios:
+            # Tres estados, no dos: no se puede asignar · se asigna pero la
+            # solicitud sigue incompleta · queda lista. Mezclar los dos últimos
+            # haría creer que hay que arreglar algo aquí para poder aplicar.
             if not c.valido:
                 icono, color = ft.Icons.ERROR, ROJO
-                errores = [h.mensaje for h in c.hallazgos if h.es_error]
-                detalle = errores[0] if errores else "Con problemas."
+                detalle = c.bloqueantes[0].mensaje
+            elif c.pendientes:
+                icono, color = ft.Icons.PENDING_ACTIONS, NARANJA
+                detalle = f"Se asigna, pero falta: {c.pendientes[0].mensaje}"
             elif c.aviso:
                 icono, color, detalle = ft.Icons.WARNING_AMBER, NARANJA, c.aviso
             else:
@@ -225,11 +236,17 @@ class AsignacionMasiva:
         self.tabla.set_contenido(filas)
 
         validos = plan.validos
-        self.txt_resumen.value = (
-            f"{len(plan.cambios)} solicitud(es) afectada(s) · "
-            f"{len(validos)} quedarían correctas · "
-            f"{len(plan.cambios) - len(validos)} con problemas")
-        self.txt_resumen.color = VERDE if validos else ROJO
+        partes = [f"{len(plan.cambios)} solicitud(es) afectada(s)",
+                  f"{len(plan.completos)} quedarían listas"]
+        if plan.incompletos:
+            partes.append(f"{len(plan.incompletos)} se asignan pero les falta "
+                          f"algo fuera del desglose")
+        bloqueadas = len(plan.cambios) - len(validos)
+        if bloqueadas:
+            partes.append(f"{bloqueadas} no se pueden asignar")
+        self.txt_resumen.value = " · ".join(partes)
+        self.txt_resumen.color = (
+            ROJO if not validos else NARANJA if plan.incompletos else VERDE)
         if plan.omitidas:
             self.txt_omitidas.value = (
                 "No se tocan: " + ", ".join(plan.omitidas[:4])
@@ -247,13 +264,20 @@ class AsignacionMasiva:
     def _aplicar(self, _e=None) -> None:
         if not self._plan:
             return
+        incompletas = len(self._plan.incompletos)
         resultado = asignacion.aplicar(self._lote_id, self._plan)
         self.modal.cerrar()
         if callable(self._al_aplicar):
             self._al_aplicar(resultado["aplicadas"])
+        mensaje = f"{resultado['aplicadas']} solicitud(es) actualizadas."
+        # Se dice aquí porque el modal se cierra: si no, el usuario se queda
+        # creyendo que el lote quedó listo para correr.
+        if incompletas:
+            mensaje += (f" {incompletas} siguen incompletas por otros campos y "
+                        f"el robot no las capturará hasta corregirlas.")
+        mensaje += " Puedes deshacerlo desde el botón «Deshacer» del lote."
         self.app.avisar(
-            f"{resultado['aplicadas']} solicitud(es) actualizadas. Puedes "
-            f"deshacerlo desde el botón «Deshacer» del lote.", VERDE,
+            mensaje, NARANJA if incompletas else VERDE,
             accion="Deshacer", on_accion=self._deshacer_desde_aviso,
             duracion=12000)
 

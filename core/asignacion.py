@@ -13,6 +13,14 @@ Por eso está partida en dos pasos que no se pueden saltar:
 
 Y por eso todo lo que sale de aquí pasa por `core.validador`: el objetivo de la
 asignación masiva es ahorrar capturas, no saltarse las reglas.
+
+Ahora bien, «pasa por el validador» no es lo mismo que «se niega a aplicar». Lo
+único que esta operación escribe es el desglose, así que solo la bloquean los
+errores del desglose. Lo que ya venía mal por otro lado —una CLABE faltante, un
+RFC mal escrito— se informa pero no impide asignar: negarse dejaría al usuario
+sin salida, porque este modal tampoco permite corregir esos campos. La red que
+impide que una solicitud incompleta llegue a SIPP está donde corresponde, en
+`rpa_sipp.procesar_lote`, que la valida antes de capturarla.
 """
 
 from __future__ import annotations
@@ -38,6 +46,12 @@ EN_BLANCO = "BLANCO"             # se deja en cero y se llena a mano
 IMPORTE_FIJO = "FIJO"            # el mismo importe para todas
 
 
+# El único campo que esta operación escribe es el desglose. El validador marca
+# sus hallazgos con `campo`, así que ese es el corte entre lo que la asignación
+# provoca y lo que ya venía mal de antes.
+_CAMPO_DESGLOSE = "partidas"
+
+
 @dataclass
 class Cambio:
     """Lo que le pasaría a UNA solicitud. Nada de esto se ha guardado aún."""
@@ -59,7 +73,36 @@ class Cambio:
                                  self.partidas_despues)
 
     @property
+    def bloqueantes(self) -> list:
+        """Errores del desglose: los que esta asignación dejaría escritos."""
+        return [h for h in self.hallazgos
+                if h.es_error and h.campo == _CAMPO_DESGLOSE]
+
+    @property
+    def pendientes(self) -> list:
+        """Errores ajenos al desglose, que ya traía la solicitud.
+
+        La CLABE, el RFC o la fecha no se tocan aquí, así que negarse a asignar
+        el concepto por culpa de ellos no arregla nada: deja al usuario sin
+        salida, porque este modal tampoco permite corregirlos. Se informan y la
+        solicitud se aplica; sigue marcada como incompleta en la tabla del lote
+        y **el motor se niega a capturarla** hasta que se corrija.
+        """
+        return [h for h in self.hallazgos
+                if h.es_error and h.campo != _CAMPO_DESGLOSE]
+
+    @property
     def valido(self) -> bool:
+        """True si se puede aplicar; no si la solicitud queda lista.
+
+        Son cosas distintas: una solicitud puede recibir bien su concepto y
+        seguir sin CLABE. Para «lista para capturar» está `completo`.
+        """
+        return not self.bloqueantes
+
+    @property
+    def completo(self) -> bool:
+        """True si tras aplicar no le quedaría ningún error."""
         return not validador.hay_errores(self.hallazgos)
 
 
@@ -73,7 +116,18 @@ class Plan:
 
     @property
     def validos(self) -> list[Cambio]:
+        """Los que se pueden aplicar (el desglose queda bien)."""
         return [c for c in self.cambios if c.valido]
+
+    @property
+    def completos(self) -> list[Cambio]:
+        """Los que además quedarían listos para capturar."""
+        return [c for c in self.cambios if c.completo]
+
+    @property
+    def incompletos(self) -> list[Cambio]:
+        """Se aplican, pero siguen con algo que corregir fuera del desglose."""
+        return [c for c in self.cambios if c.valido and not c.completo]
 
     @property
     def con_aviso(self) -> list[Cambio]:

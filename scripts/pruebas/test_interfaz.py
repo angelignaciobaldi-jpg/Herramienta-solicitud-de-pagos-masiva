@@ -397,6 +397,36 @@ def probar_asignacion_respeta_la_seleccion_previa():
     assert [c.solicitud.id for c in modal._plan.cambios] == [s.id]
 
 
+def probar_asignacion_deja_aplicar_aunque_falte_otro_campo():
+    """el botón no se bloquea por un campo que este modal no puede corregir"""
+    # El caso reportado: una solicitud sin CLABE dejaba «Aplicar» apagado, sin
+    # forma de asignar el concepto ni de arreglar la CLABE desde aquí.
+    from ui.asignacion_masiva import AsignacionMasiva
+
+    app = comun.AppFalsa()
+    modal = AsignacionMasiva(app, lambda *_a: None)
+    lote = comun.lote()
+    s = comun.solicitud(lote.id, "ANDREA BARROS GARCIA", cuenta_clabe="",
+                        partidas=[comun.insumo("Facturado", 1500.0,
+                                               origen="CFDI")])
+    modal.abrir(lote.id, set())
+    modal.dd_nombre.value = "PAGO TARJETA CREDITO"
+    modal._calcular()
+
+    assert not modal.btn_aplicar.disabled, "tenía que poder aplicarse"
+    assert modal.btn_aplicar.text == "Aplicar a 1"
+    resumen = modal.txt_resumen.value
+    assert "0 quedarían listas" in resumen
+    assert "1 se asignan pero les falta algo fuera del desglose" in resumen
+    assert "no se pueden asignar" not in resumen
+
+    modal._aplicar()
+    assert len(db.listar_partidas(s.id)) == 2
+    # Y se dice que sigue sin poder capturarse: el modal se cierra y es la
+    # última oportunidad de decirlo.
+    assert "el robot no las capturará" in app.ultimo_aviso
+
+
 def probar_asignacion_aplica_y_deshace_desde_el_aviso():
     """se aplica y se puede revertir desde el propio aviso de éxito"""
     from ui.asignacion_masiva import AsignacionMasiva

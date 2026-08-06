@@ -155,8 +155,94 @@ def probar_aplicar_y_deshacer():
     assert not asignacion.deshacer(lote.id)
 
 
+def probar_un_campo_ajeno_no_impide_asignar():
+    """faltar la CLABE no bloquea el concepto, pero se informa"""
+    # El modal no permite corregir la CLABE, así que negarse a asignar por ella
+    # dejaría al usuario sin salida sin evitar ningún riesgo: quien impide que
+    # llegue a SIPP es el motor.
+    lote = comun.lote()
+    s = comun.solicitud(lote.id, "ANDREA BARROS GARCIA", cuenta_clabe="",
+                        partidas=[comun.insumo("Facturado", 1500.0,
+                                               origen="CFDI")])
+    plan = asignacion.calcular(lote.id, nombre="PAGO TARJETA CREDITO",
+                               criterio_importe=asignacion.TOTAL_SOLICITUD)
+    cambio = plan.cambios[0]
+    assert cambio.valido, "el desglose queda bien; debe poder aplicarse"
+    assert not cambio.completo, "pero la solicitud no queda lista"
+    assert any("CLABE" in h.mensaje for h in cambio.pendientes)
+    assert not cambio.bloqueantes
+    assert plan.incompletos == [cambio] and not plan.completos
+
+    asignacion.aplicar(lote.id, plan)
+    partidas = db.listar_partidas(s.id)
+    assert [p.concepto_nombre for p in partidas if p.clase == CONCEPTO] == [
+        "PAGO TARJETA CREDITO"]
+    assert db.obtener_solicitud(s.id).importe_total == 1500.0
+
+
+def probar_un_desglose_malo_si_bloquea():
+    """lo que esta operación sí escribe la sigue bloqueando"""
+    lote = comun.lote()
+    comun.solicitud(lote.id, "ANA LOPEZ", partidas=[
+        comun.insumo("Facturado", 1000.0, origen="CFDI")])
+    plan = asignacion.calcular(lote.id, nombre="VIGILANCIA",
+                               criterio_importe=asignacion.EN_BLANCO)
+    cambio = plan.cambios[0]
+    assert not cambio.valido
+    assert cambio.bloqueantes and all(h.campo == "partidas"
+                                      for h in cambio.bloqueantes)
+    assert asignacion.aplicar(lote.id, plan)["aplicadas"] == 0
+
+
 def probar_sin_nombre_no_hay_plan():
     """sin concepto que asignar no se calcula nada"""
     lote, *_ = _lote_con_cfdi()
     plan = asignacion.calcular(lote.id, nombre="   ")
     assert plan.error and not plan.cambios
+
+
+# --------------------------------------------------------------------------- #
+#  La puerta del motor
+# --------------------------------------------------------------------------- #
+# La contraparte de lo anterior: si la asignación masiva deja pasar una solicitud
+# incompleta, alguien tiene que negarse a capturarla. Ese alguien es el motor, y
+# es el único punto por el que se pasa a fuerza antes de tocar SIPP. Estas dos
+# pruebas van aquí, junto a las que relajan el bloqueo, para que nadie quite una
+# sin ver la otra.
+def probar_el_motor_no_intenta_lo_incompleto():
+    """una solicitud sin CLABE queda en REVISAR y no se abre el navegador"""
+    # Si `procesar_lote` llegara a abrir Playwright, esta prueba fallaría por
+    # falta de navegador o se colgaría: que devuelva sin tocarlo es la prueba.
+    from core import rpa_sipp
+
+    lote = comun.lote()
+    s = comun.solicitud(lote.id, "ANDREA BARROS GARCIA", cuenta_clabe="",
+                        partidas=[comun.concepto("VIGILANCIA", 1500.0)])
+    resumen = rpa_sipp.procesar_lote(
+        lote.id, "usuario", "clave", url_login="http://no.se.usa.invalid")
+
+    assert resumen == {"ok": 0, "revisar": 1, "error": 0, "cancelado": False,
+                       "detalle": ["ANDREA BARROS GARCIA: datos incompletos, "
+                                   "no se intentó."]}
+    guardada = db.obtener_solicitud(s.id)
+    assert guardada.estado == "REVISAR"
+    assert "CLABE" in guardada.error_msg
+    assert guardada.intentos == 0, "no se intentó, no se cuenta un intento"
+    # El motivo queda en la bitácora, no solo en la pantalla.
+    assert any("CLABE" in b.mensaje for b in db.listar_bitacora(s.id))
+
+
+def probar_el_motor_no_cuenta_como_lista_la_que_salto():
+    """lo incompleto no se confunde con lo capturado"""
+    lote = comun.lote()
+    comun.solicitud(lote.id, "SIN CLABE", cuenta_clabe="",
+                    partidas=[comun.concepto("VIGILANCIA", 100.0)])
+    comun.solicitud(lote.id, "SIN DESGLOSE", partidas=[])
+    comun.solicitud(lote.id, "YA CAPTURADA", estado="GUARDADA",
+                    partidas=[comun.concepto("VIGILANCIA", 100.0)])
+
+    from core import rpa_sipp
+
+    resumen = rpa_sipp.procesar_lote(
+        lote.id, "usuario", "clave", url_login="http://no.se.usa.invalid")
+    assert resumen["revisar"] == 2 and resumen["ok"] == 0
