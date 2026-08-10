@@ -735,6 +735,50 @@ def restaurar_snapshot(lote_id: str) -> bool:
     return True
 
 
+def solicitud_en_snapshot(lote_id: str, solicitud_id: str) -> bool:
+    """True si esa solicitud aparece en el snapshot y se puede revertir sola."""
+    with conectar() as con:
+        fila = con.execute(
+            "SELECT datos FROM snapshot WHERE lote_id = ?", (lote_id,)).fetchone()
+    if not fila:
+        return False
+    return any(s["id"] == solicitud_id
+               for s in json.loads(fila["datos"]).get("solicitudes", []))
+
+
+def restaurar_solicitud_snapshot(lote_id: str, solicitud_id: str) -> bool:
+    """Devuelve UNA solicitud al estado del snapshot, dejando el resto como está.
+
+    Es el «deshacer» de una fila, y se comporta distinto del global a propósito:
+    **no consume el snapshot**. Una asignación masiva toca decenas de
+    solicitudes y lo normal es que la mayoría queden bien y una o dos no; si
+    revertir la primera borrara el snapshot, las demás se quedarían sin vuelta
+    atrás. El snapshot se conserva hasta que se deshaga todo el lote o hasta que
+    otra operación masiva lo reemplace.
+
+    Devuelve False si no hay snapshot o si esa solicitud no está en él (por
+    ejemplo, si se creó después): no hay estado anterior al que volver.
+    """
+    with conectar() as con:
+        fila = con.execute(
+            "SELECT datos FROM snapshot WHERE lote_id = ?", (lote_id,)).fetchone()
+        if not fila:
+            return False
+        contenido = json.loads(fila["datos"])
+        datos = next((s for s in contenido.get("solicitudes", [])
+                      if s["id"] == solicitud_id), None)
+        if datos is None:
+            return False
+
+        con.execute("DELETE FROM partida WHERE solicitud_id = ?",
+                    (solicitud_id,))
+        con.execute("DELETE FROM solicitud WHERE id = ?", (solicitud_id,))
+        _guardar(con, "solicitud", Solicitud(**datos))
+        for p in contenido.get("partidas", {}).get(solicitud_id, []):
+            _guardar(con, "partida", Partida(**p))
+    return True
+
+
 # --------------------------------------------------------------------------- #
 #  Estado de la interfaz (columnas de la tabla, filtros)
 # --------------------------------------------------------------------------- #

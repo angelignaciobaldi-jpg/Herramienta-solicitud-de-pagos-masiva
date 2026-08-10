@@ -11,11 +11,12 @@ import os
 
 from openpyxl import Workbook, load_workbook
 
-from core import db, plantilla_excel
+from core import db, plantilla_excel, validador
 from core.adaptadores import caratulas
 from core.adaptadores import cfdi as adaptador_cfdi
 from core.adaptadores import excel as adaptador
-from core.db import CONCEPTO, INSUMO
+from core.adaptadores import ocr_caratula
+from core.db import CONCEPTO, INSUMO, Solicitud
 from scripts.pruebas import comun
 
 # Columnas de la hoja principal, en orden. Se arma a partir del contrato para
@@ -96,7 +97,7 @@ def probar_lee_una_fila_completa():
         tipo_beneficiario="Acreedor", beneficiario_nombre="JUAN PEREZ LOPEZ",
         beneficiario_rfc="XAXX010101000", beneficiario_correo="j@x.invalid",
         forma_pago="Transferencia", tipo_gasto="No Deducible",
-        cuenta_banco="BBVA", cuenta_clabe="012345678901234567",
+        cuenta_banco="BBVA", cuenta_clabe="012345678901234568",
         fecha_pago="15/09/2026", moneda="Pesos (MXN)",
         descripcion="Finiquito", concepto_nombre="PAGO PTU",
         importe="12500.00")])
@@ -116,10 +117,10 @@ def probar_la_clabe_conserva_sus_ceros():
         empresa="Abastecedora", sucursal="Corporativo",
         tipo_beneficiario="Acreedor", beneficiario_nombre="ANA LOPEZ",
         beneficiario_rfc="XAXX010101000", forma_pago="Transferencia",
-        tipo_gasto="No Deducible", cuenta_clabe="012345678901234567",
+        tipo_gasto="No Deducible", cuenta_clabe="012345678901234568",
         fecha_pago="15/09/2026", concepto_nombre="PAGO PTU", importe="100")])
     clabe = adaptador.leer(lleno, "l").filas[0].solicitud.cuenta_clabe
-    assert clabe == "012345678901234567", clabe
+    assert clabe == "012345678901234568", clabe
 
 
 def probar_importe_con_formato_de_moneda():
@@ -128,7 +129,7 @@ def probar_importe_con_formato_de_moneda():
         empresa="Abastecedora", sucursal="Corporativo",
         tipo_beneficiario="Acreedor", beneficiario_nombre="ANA LOPEZ",
         beneficiario_rfc="XAXX010101000", forma_pago="Transferencia",
-        tipo_gasto="No Deducible", cuenta_clabe="012345678901234567",
+        tipo_gasto="No Deducible", cuenta_clabe="012345678901234568",
         fecha_pago="15/09/2026", concepto_nombre="PAGO PTU",
         importe="$8,300.50")])
     assert adaptador.leer(lleno, "l").filas[0].solicitud.importe_total == 8300.50
@@ -141,7 +142,7 @@ def probar_la_clase_la_impone_el_tipo_de_beneficiario():
               tipo_beneficiario="Proveedor",
               beneficiario_nombre="PROVEEDOR SA",
               beneficiario_rfc="XAXX010101000", forma_pago="Transferencia",
-              tipo_gasto="No Deducible", cuenta_clabe="012345678901234567",
+              tipo_gasto="No Deducible", cuenta_clabe="012345678901234568",
               cuenta_banco="BBVA", fecha_pago="15/09/2026",
               concepto_nombre="Mantenimiento de equipo", importe="3000"),
         _fila(empresa="Abastecedora", sucursal="Corporativo",
@@ -169,7 +170,7 @@ def probar_la_hoja_de_partidas_manda():
                sucursal="Corporativo", tipo_beneficiario="Acreedor",
                beneficiario_nombre="CONSTRUCTORA DEL NORTE",
                beneficiario_rfc="XAXX010101000", forma_pago="Transferencia",
-               tipo_gasto="No Deducible", cuenta_clabe="012345678901234567",
+               tipo_gasto="No Deducible", cuenta_clabe="012345678901234568",
                fecha_pago="15/09/2026", concepto_nombre="IGNORAR ESTE",
                importe="1")],
         partidas=[
@@ -191,7 +192,7 @@ def probar_fila_incompleta_no_bloquea_a_las_demas():
         _fila(empresa="Abastecedora", sucursal="Corporativo",
               tipo_beneficiario="Acreedor", beneficiario_nombre="BUENA",
               beneficiario_rfc="XAXX010101000", forma_pago="Transferencia",
-              tipo_gasto="No Deducible", cuenta_clabe="012345678901234567",
+              tipo_gasto="No Deducible", cuenta_clabe="012345678901234568",
               cuenta_banco="BBVA", fecha_pago="15/09/2026",
               concepto_nombre="PAGO PTU", importe="1000"),
         # Sin empresa, CLABE corta y sin fecha.
@@ -210,7 +211,7 @@ def probar_duplicados_dentro_del_archivo():
     fila = _fila(empresa="Abastecedora", sucursal="Corporativo",
                  tipo_beneficiario="Acreedor", beneficiario_nombre="ANA",
                  beneficiario_rfc="XAXX010101000", forma_pago="Transferencia",
-                 tipo_gasto="No Deducible", cuenta_clabe="012345678901234567",
+                 tipo_gasto="No Deducible", cuenta_clabe="012345678901234568",
                  fecha_pago="15/09/2026", concepto_nombre="PAGO PTU",
                  importe="100")
     imp = adaptador.leer(_plantilla_llena([fila, list(fila)]), "l")
@@ -396,21 +397,21 @@ def probar_el_excel_completa_por_nombre():
               tipo_beneficiario="Acreedor",
               beneficiario_nombre="RUIZ SOTO MARIA",
               beneficiario_rfc="XAXX010101000", forma_pago="Transferencia",
-              tipo_gasto="No Deducible", cuenta_clabe="002345678901234568",
+              tipo_gasto="No Deducible", cuenta_clabe="002345678901234565",
               fecha_pago="15/09/2026", concepto_nombre="VIGILANCIA",
               importe="8300.50"),
         _fila(empresa="Abastecedora", sucursal="Corporativo",
               tipo_beneficiario="Acreedor",
               beneficiario_nombre="JUAN PEREZ LOPEZ",
               beneficiario_rfc="XAXX010101000", forma_pago="Transferencia",
-              tipo_gasto="No Deducible", cuenta_clabe="012345678901234567",
+              tipo_gasto="No Deducible", cuenta_clabe="012345678901234568",
               fecha_pago="15/09/2026", concepto_nombre="VIGILANCIA",
               importe="12500.00"),
         _fila(empresa="Abastecedora", sucursal="Corporativo",
               tipo_beneficiario="Acreedor",
               beneficiario_nombre="SIN CARATULA PEREZ",
               beneficiario_rfc="XAXX010101000", forma_pago="Transferencia",
-              tipo_gasto="No Deducible", cuenta_clabe="012345678901234599",
+              tipo_gasto="No Deducible", cuenta_clabe="012345678901234597",
               fecha_pago="15/09/2026", concepto_nombre="VIGILANCIA",
               importe="999.00"),
     ])
@@ -425,7 +426,7 @@ def probar_el_excel_completa_por_nombre():
     assert maria.solicitud.importe_total == 8300.50
     juan = [b for b in borradores
             if b.nombre_detectado == "JUAN PEREZ LOPEZ"][0]
-    assert juan.listo and juan.solicitud.cuenta_clabe == "012345678901234567"
+    assert juan.listo and juan.solicitud.cuenta_clabe == "012345678901234568"
 
 
 def probar_una_fila_del_excel_se_usa_una_vez():
@@ -439,9 +440,211 @@ def probar_una_fila_del_excel_se_usa_una_vez():
         empresa="Abastecedora", sucursal="Corporativo",
         tipo_beneficiario="Acreedor", beneficiario_nombre="JUAN PEREZ LOPEZ",
         beneficiario_rfc="XAXX010101000", forma_pago="Transferencia",
-        tipo_gasto="No Deducible", cuenta_clabe="012345678901234567",
+        tipo_gasto="No Deducible", cuenta_clabe="012345678901234568",
         fecha_pago="15/09/2026", concepto_nombre="VIGILANCIA",
         importe="100")])
     resumen = caratulas.completar_con_excel(
         borradores, adaptador.leer(lleno, lote.id).filas)
     assert resumen["emparejados"] == 1, resumen
+
+
+# --------------------------------------------------------------------------- #
+#  Lectura de la carátula (OCR)
+# --------------------------------------------------------------------------- #
+# La CLABE es el dato del que depende a quién se le paga, y aquí la escribe un
+# OCR, no una persona. Por eso se prueba el verificador antes que nada: es lo
+# único que distingue una CLABE bien leída de una con un dígito confundido, que
+# tiene exactamente la misma forma.
+def probar_la_clabe_se_valida_con_su_digito_verificador():
+    """una CLABE con un dígito cambiado se detecta, aunque mida 18"""
+    buena = "012345678901234568"
+    assert ocr_caratula.clabe_valida(buena)
+    # Mismo largo y mismo prefijo de banco, el ÚLTIMO dígito cambiado: se ve
+    # igual de bien que la buena y la única forma de cazarla es el verificador.
+    assert not ocr_caratula.clabe_valida("012345678901234567")
+    # Y un dígito cambiado a media CLABE, que es el error típico del OCR.
+    assert not ocr_caratula.clabe_valida("012345678901294568")
+    assert not ocr_caratula.clabe_valida("01234567890123456")   # 17 dígitos
+    assert not ocr_caratula.clabe_valida("")
+    # El adaptador solo reexporta la del validador: tiene que ser la MISMA
+    # función, o con el tiempo una aceptaría lo que la otra rechaza.
+    assert ocr_caratula.clabe_valida is validador.clabe_valida
+
+
+def probar_se_lee_la_clabe_el_titular_y_el_banco():
+    """de una carátula se sacan los datos que la solicitud necesita"""
+    texto = (
+        "BBVA MEXICO S.A.\n"
+        "Estado de cuenta\n"
+        "Titular de la cuenta: MARIA DE LA CRUZ ÑUÑO\n"
+        "No. de cuenta: 1234567890\n"
+        "CLABE interbancaria: 012345678901234568\n")
+    datos = ocr_caratula.interpretar(texto)
+    assert datos.clabe == "012345678901234568"
+    assert datos.clabe_confiable
+    # El banco sale del prefijo de la CLABE, más confiable que leer el logo.
+    assert datos.banco == "BBVA"
+    # Los acentos y la Ñ se conservan: así se registra en SIPP para siempre.
+    assert datos.titular == "MARIA DE LA CRUZ ÑUÑO", datos.titular
+    assert datos.cuenta == "1234567890"
+
+
+def probar_no_se_devuelve_el_rfc_del_banco():
+    """el RFC del encabezado es de la institución, no del beneficiario"""
+    # Aparece en casi toda carátula y es el falso positivo más frecuente:
+    # tomarlo daría de alta al beneficiario con el RFC del banco.
+    texto = (
+        "BANCO SANTANDER MEXICO, INSTITUCION DE BANCA MULTIPLE\n"
+        "R.F.C. BSM970519DU8\n"
+        "Titular: JUAN PEREZ LOPEZ\n"
+        "CLABE: 014111222333444559\n")
+    datos = ocr_caratula.interpretar(texto)
+    assert datos.rfc == "", f"se coló el RFC del banco: {datos.rfc}"
+    assert datos.titular == "JUAN PEREZ LOPEZ"
+
+
+def probar_el_titular_de_la_caratula_manda_sobre_el_nombre_del_archivo():
+    """el beneficiario sale de la carátula, no de cómo se llame el archivo"""
+    # Es el cambio de fondo de esta función. El nombre del archivo lo escribió
+    # alguien de memoria al armar la carpeta; el titular es lo que el banco
+    # acredita como dueño de la cuenta a la que se va a pagar.
+    carpeta = comun.carpeta_temporal()
+    comun.caratula_pdf(carpeta, "CARATULA JUAN PEREZ LOPEZ.pdf",
+                       titular="MARIA RUIZ SOTO", clabe="012345678901234568")
+    lote = comun.lote()
+    borradores = caratulas.crear_borradores([carpeta], lote.id)
+
+    assert len(borradores) == 1
+    b = borradores[0]
+    assert b.solicitud.beneficiario_nombre == "MARIA RUIZ SOTO", \
+        b.solicitud.beneficiario_nombre
+    assert b.origen_nombre == caratulas.NOMBRE_DE_OCR
+    # El nombre de la cuenta ES el del beneficiario.
+    assert b.solicitud.cuenta_titular == "MARIA RUIZ SOTO"
+    # Y de paso llegan la CLABE y el banco, que el archivo no podía dar.
+    assert b.solicitud.cuenta_clabe == "012345678901234568"
+    assert b.solicitud.cuenta_banco == "BBVA"
+    assert b.clabe_confiable
+
+
+def probar_una_caratula_ilegible_no_tumba_la_carga():
+    """un archivo que no se puede leer cae al nombre del archivo, no falla"""
+    carpeta = comun.carpeta_temporal()
+    comun.pdf_falso(carpeta, "CARATULA JUAN PEREZ LOPEZ.pdf")
+    lote = comun.lote()
+    borradores = caratulas.crear_borradores([carpeta], lote.id)
+    assert len(borradores) == 1
+    b = borradores[0]
+    assert b.solicitud.beneficiario_nombre == "JUAN PEREZ LOPEZ"
+    assert b.origen_nombre == caratulas.NOMBRE_DE_ARCHIVO
+    # El titular de la cuenta acompaña al beneficiario: son la misma persona.
+    assert b.solicitud.cuenta_titular == "JUAN PEREZ LOPEZ"
+
+
+# --------------------------------------------------------------------------- #
+#  Emparejamiento con el Excel por CLABE
+# --------------------------------------------------------------------------- #
+def _borrador(nombre: str, clabe: str) -> caratulas.Borrador:
+    """Borrador ya «leído», para probar el emparejamiento sin OCR ni archivos."""
+    return caratulas.Borrador(
+        ruta=f"{nombre}.pdf", nombre_detectado=nombre,
+        origen_nombre=caratulas.NOMBRE_DE_OCR,
+        solicitud=Solicitud(
+            empresa="Abastecedora", sucursal="Corporativo",
+            tipo_beneficiario="Acreedor", beneficiario_nombre=nombre,
+            cuenta_titular=nombre, cuenta_clabe=clabe,
+            forma_pago="Transferencia", tipo_gasto="No Deducible"))
+
+
+def probar_el_excel_empareja_por_clabe_aunque_el_nombre_difiera():
+    """la CLABE manda: es el mismo número en los dos lados"""
+    # El caso real: en el Excel el nombre viene invertido, abreviado o con un
+    # apellido de más. Emparejar por nombre lo dejaría fuera; por CLABE, no.
+    lote = comun.lote()
+    borradores = [_borrador("MARIA RUIZ SOTO", "012345678901234568")]
+    lleno = _plantilla_llena([_fila(
+        empresa="Abastecedora", sucursal="Corporativo",
+        tipo_beneficiario="Acreedor",
+        beneficiario_nombre="MA. RUIZ S. DE JESUS",
+        beneficiario_rfc="XAXX010101000", forma_pago="Transferencia",
+        tipo_gasto="No Deducible", cuenta_clabe="012345678901234568",
+        fecha_pago="15/09/2026", concepto_nombre="VIGILANCIA",
+        importe="8300.50")])
+    resumen = caratulas.completar_con_excel(
+        borradores, adaptador.leer(lleno, lote.id).filas)
+
+    assert resumen["por_clabe"] == 1, resumen
+    assert resumen["por_nombre"] == 0, resumen
+    b = borradores[0]
+    assert b.solicitud.importe_total == 8300.50
+    # El nombre NO se sobrescribe: manda el de la carátula, que es la que
+    # acredita la cuenta.
+    assert b.solicitud.beneficiario_nombre == "MARIA RUIZ SOTO"
+
+
+def probar_sin_clabe_se_empareja_por_nombre():
+    """cuando el OCR no pudo leer la CLABE, el nombre sigue sirviendo"""
+    lote = comun.lote()
+    borradores = [_borrador("JUAN PEREZ LOPEZ", "")]
+    lleno = _plantilla_llena([_fila(
+        empresa="Abastecedora", sucursal="Corporativo",
+        tipo_beneficiario="Acreedor", beneficiario_nombre="PEREZ LOPEZ JUAN",
+        beneficiario_rfc="XAXX010101000", forma_pago="Transferencia",
+        tipo_gasto="No Deducible", cuenta_clabe="072987654321098764",
+        fecha_pago="15/09/2026", concepto_nombre="VIGILANCIA",
+        importe="100")])
+    resumen = caratulas.completar_con_excel(
+        borradores, adaptador.leer(lleno, lote.id).filas)
+
+    assert resumen["por_nombre"] == 1, resumen
+    # Al no tenerla, la CLABE del Excel sí completa el hueco.
+    assert borradores[0].solicitud.cuenta_clabe == "072987654321098764"
+
+
+def probar_clabe_distinta_conserva_la_de_la_caratula_y_avisa():
+    """si las dos CLABE existen y difieren, manda la carátula y queda constancia"""
+    # Casi siempre significa que el Excel trae el renglón de otra persona. No se
+    # bloquea —el usuario decide— pero no puede pasar en silencio.
+    lote = comun.lote()
+    borradores = [_borrador("ANA LOPEZ RUIZ", "012345678901234568")]
+    lleno = _plantilla_llena([_fila(
+        empresa="Abastecedora", sucursal="Corporativo",
+        tipo_beneficiario="Acreedor", beneficiario_nombre="ANA LOPEZ RUIZ",
+        beneficiario_rfc="XAXX010101000", forma_pago="Transferencia",
+        tipo_gasto="No Deducible", cuenta_clabe="072987654321098764",
+        fecha_pago="15/09/2026", concepto_nombre="VIGILANCIA",
+        importe="500")])
+    resumen = caratulas.completar_con_excel(
+        borradores, adaptador.leer(lleno, lote.id).filas)
+
+    assert resumen["discrepancias"] == 1, resumen
+    b = borradores[0]
+    assert b.solicitud.cuenta_clabe == "012345678901234568", "manda la carátula"
+    assert b.avisos and "no es la de la carátula" in b.avisos[0]
+    # Se empareja igual: el resto de los datos del renglón sí sirven.
+    assert b.solicitud.importe_total == 500.0
+
+
+def probar_la_clabe_gana_la_fila_antes_que_el_nombre():
+    """una coincidencia por nombre no puede robarse la fila que casa por CLABE"""
+    # Por eso el emparejamiento va en dos pasadas COMPLETAS y no solicitud por
+    # solicitud: resolviendo una a una, la homónima sin CLABE se llevaría el
+    # único renglón y la que sí casaba por CLABE se quedaría sin él.
+    lote = comun.lote()
+    con_clabe = _borrador("JUAN PEREZ LOPEZ", "012345678901234568")
+    sin_clabe = _borrador("JUAN PEREZ LOPEZ", "")
+    lleno = _plantilla_llena([_fila(
+        empresa="Abastecedora", sucursal="Corporativo",
+        tipo_beneficiario="Acreedor", beneficiario_nombre="JUAN PEREZ LOPEZ",
+        beneficiario_rfc="XAXX010101000", forma_pago="Transferencia",
+        tipo_gasto="No Deducible", cuenta_clabe="012345678901234568",
+        fecha_pago="15/09/2026", concepto_nombre="VIGILANCIA",
+        importe="750")])
+    # El que NO tiene CLABE va primero en la lista, para que ganar por orden no
+    # baste: tiene que ganar por criterio.
+    caratulas.completar_con_excel([sin_clabe, con_clabe],
+                                  adaptador.leer(lleno, lote.id).filas)
+
+    assert con_clabe.emparejado_por == caratulas.POR_CLABE
+    assert con_clabe.solicitud.importe_total == 750.0
+    assert sin_clabe.emparejado_por == "", "no debía quedarse con esa fila"

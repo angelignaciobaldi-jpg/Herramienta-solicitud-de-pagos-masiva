@@ -8,7 +8,6 @@ incompleto se bloquee. Que además se DIBUJEN es otra cosa, y la cubre
 
 from __future__ import annotations
 
-import asyncio
 import os
 
 from openpyxl import load_workbook
@@ -16,11 +15,6 @@ from openpyxl import load_workbook
 from core import asignacion, conceptos, db, documentos, plantilla_excel
 from core.db import CONCEPTO, INSUMO
 from scripts.pruebas import comun
-
-
-def _correr(corrutina):
-    """Ejecuta una corrutina en las pruebas que tocan métodos async."""
-    return asyncio.run(corrutina)
 
 
 # --------------------------------------------------------------------------- #
@@ -76,7 +70,7 @@ def probar_solicitudes_crea_lote_y_da_de_alta():
     solicitud = db.Solicitud(
         lote_id=lote_id, empresa="Abastecedora", sucursal="Corporativo",
         tipo_beneficiario="Acreedor", beneficiario_nombre="ANA LOPEZ",
-        beneficiario_rfc="XAXX010101000", cuenta_clabe="012345678901234567",
+        beneficiario_rfc="XAXX010101000", cuenta_clabe="012345678901234568",
         cuenta_banco="BBVA", forma_pago="Transferencia",
         tipo_gasto="No Deducible", fecha_pago="20/09/2026")
     pantalla._recibir_solicitud(solicitud, [comun.concepto("VIGILANCIA", 1200.0)])
@@ -113,30 +107,168 @@ def probar_duplicar_precarga_el_editor():
     s = comun.solicitud(pantalla._lote.id, "ANA LOPEZ",
                         partidas=[comun.concepto("VIGILANCIA", 100.0)])
     pantalla._recargar_solicitudes()
-    pantalla._seleccionados = {s.id}
-    pantalla._duplicar()
+    # Se duplica por su id, desde el ícono de la fila: ya no hace falta
+    # seleccionarla antes.
+    pantalla._duplicar(s.id)
     assert pantalla.captura.tf_nombre.value == "ANA LOPEZ"
     assert pantalla.captura._solicitud.id != s.id
     assert len(db.listar_solicitudes(pantalla._lote.id)) == 1, "no debe guardar"
 
 
-def probar_deshacer_solo_cuando_hay_algo():
-    """el botón de deshacer está apagado si no hay operación que revertir"""
+def probar_deshacer_por_fila_no_toca_al_resto():
+    """deshacer en una solicitud la revierte solo a ella, y deja deshacer más"""
     from ui.solicitudes import SeccionSolicitudes
 
     app = comun.AppFalsa()
     pantalla = SeccionSolicitudes(app)
     pantalla.cargar_desde_db()
-    comun.solicitud(pantalla._lote.id, "ANA LOPEZ", partidas=[
+    lote_id = pantalla._lote.id
+    ana = comun.solicitud(lote_id, "ANA LOPEZ", partidas=[
         comun.insumo("Facturado", 1000.0, origen="CFDI")])
+    luis = comun.solicitud(lote_id, "LUIS DIAZ MORA", partidas=[
+        comun.insumo("Facturado", 500.0, origen="CFDI")])
     pantalla._recargar_solicitudes()
-    assert pantalla.btn_deshacer.disabled
+    # Sin operación masiva no hay estado anterior al que volver.
+    assert not db.solicitud_en_snapshot(lote_id, ana.id)
 
-    plan = asignacion.calcular(pantalla._lote.id, nombre="VIGILANCIA")
-    asignacion.aplicar(pantalla._lote.id, plan)
+    plan = asignacion.calcular(lote_id, nombre="VIGILANCIA")
+    asignacion.aplicar(lote_id, plan)
     pantalla._recargar_solicitudes()
-    assert not pantalla.btn_deshacer.disabled
-    assert "Revertir" in (pantalla.btn_deshacer.tooltip or "")
+    assert db.solicitud_en_snapshot(lote_id, ana.id)
+    assert len(db.listar_partidas(ana.id)) == 2, "la masiva agregó un renglón"
+
+    # Revertir a ANA no revierte a LUIS.
+    pantalla._deshacer_fila(ana.id)
+    comun.confirmar_dialogo(app.page)
+    assert len(db.listar_partidas(ana.id)) == 1
+    assert len(db.listar_partidas(luis.id)) == 2, "el resto del lote no se toca"
+
+    # Y el snapshot SIGUE ahí: si consumirlo fuera lo normal, la segunda
+    # solicitud se quedaría sin vuelta atrás por haber arreglado la primera.
+    assert db.solicitud_en_snapshot(lote_id, luis.id)
+    pantalla._deshacer_fila(luis.id)
+    comun.confirmar_dialogo(app.page)
+    assert len(db.listar_partidas(luis.id)) == 1
+
+
+def probar_el_check_general_selecciona_todo_el_lote():
+    """el check del encabezado marca y desmarca todas las solicitudes"""
+    from ui.solicitudes import SeccionSolicitudes
+
+    app = comun.AppFalsa()
+    pantalla = SeccionSolicitudes(app)
+    pantalla.cargar_desde_db()
+    for nombre in ("ANA LOPEZ", "LUIS DIAZ", "MARIA RUIZ"):
+        comun.solicitud(pantalla._lote.id, nombre,
+                        partidas=[comun.concepto("VIGILANCIA", 100.0)])
+    pantalla._recargar_solicitudes()
+
+    assert not pantalla._seleccionados
+    assert pantalla.barra_global.visible and not pantalla.barra_seleccion.visible
+
+    pantalla._alternar_todos(comun.evento_check(True))
+    assert len(pantalla._seleccionados) == 3
+    # Las dos barras se excluyen: con selección se ve la contextual y no la
+    # global, que es de lo que depende que no queden botones muertos a la vista.
+    assert pantalla.barra_seleccion.visible
+    assert not pantalla.barra_global.visible
+    assert pantalla.txt_seleccion.value == "3 seleccionadas"
+
+    pantalla._alternar_todos(comun.evento_check(False))
+    assert not pantalla._seleccionados
+    assert pantalla.barra_global.visible
+
+
+def probar_el_check_general_refleja_la_seleccion_manual():
+    """marcar las filas una por una acaba marcando el check del encabezado"""
+    # Si no, quedaría vacío con todo el lote seleccionado, diciendo lo contrario
+    # de lo que pasa.
+    from ui.solicitudes import SeccionSolicitudes
+
+    app = comun.AppFalsa()
+    pantalla = SeccionSolicitudes(app)
+    pantalla.cargar_desde_db()
+    ids = [comun.solicitud(pantalla._lote.id, n,
+                           partidas=[comun.concepto("VIGILANCIA", 100.0)]).id
+           for n in ("ANA LOPEZ", "LUIS DIAZ")]
+    pantalla._recargar_solicitudes()
+
+    pantalla._alternar_seleccion(ids[0], comun.evento_check(True))
+    assert not pantalla.chk_todos.value, "falta una por marcar"
+    pantalla._alternar_seleccion(ids[1], comun.evento_check(True))
+    assert pantalla.chk_todos.value, "ya están todas marcadas"
+
+
+def probar_eliminar_desde_la_barra_borra_lo_seleccionado():
+    """el botón de la barra borra la selección, no una solicitud suelta"""
+    # Esta prueba existe por un error real: el manejador recibía el EVENTO de
+    # Flet en el parámetro del id y trataba de borrar una solicitud con ese
+    # objeto como identificador.
+    from ui.solicitudes import SeccionSolicitudes
+
+    app = comun.AppFalsa()
+    pantalla = SeccionSolicitudes(app)
+    pantalla.cargar_desde_db()
+    lote_id = pantalla._lote.id
+    ana = comun.solicitud(lote_id, "ANA LOPEZ",
+                          partidas=[comun.concepto("VIGILANCIA", 100.0)])
+    luis = comun.solicitud(lote_id, "LUIS DIAZ",
+                           partidas=[comun.concepto("VIGILANCIA", 100.0)])
+    pantalla._recargar_solicitudes()
+    pantalla._seleccionados = {ana.id}
+
+    # Se pulsa el BOTÓN, no su manejador, y se le pasa el evento como hace
+    # Flet: el error consistía precisamente en que ese evento aterrizaba en el
+    # parámetro del id, así que llamar al método directo no lo habría visto.
+    boton = comun.boton_por_texto(pantalla.barra_seleccion, "Eliminar")
+    boton.on_click(comun.evento_check(True))
+    comun.confirmar_dialogo(app.page)
+
+    quedan = [s.id for s in db.listar_solicitudes(lote_id)]
+    assert quedan == [luis.id], quedan
+    assert not pantalla._seleccionados
+
+
+def probar_eliminar_una_fila_no_necesita_seleccionarla():
+    """el ícono de la fila borra esa solicitud sin tocar la selección"""
+    from ui.solicitudes import SeccionSolicitudes
+
+    app = comun.AppFalsa()
+    pantalla = SeccionSolicitudes(app)
+    pantalla.cargar_desde_db()
+    lote_id = pantalla._lote.id
+    ana = comun.solicitud(lote_id, "ANA LOPEZ",
+                          partidas=[comun.concepto("VIGILANCIA", 100.0)])
+    luis = comun.solicitud(lote_id, "LUIS DIAZ",
+                           partidas=[comun.concepto("VIGILANCIA", 100.0)])
+    pantalla._recargar_solicitudes()
+    # Con OTRA solicitud seleccionada: borrar por fila no debe confundirse con
+    # la selección viva, que es justo lo que pasaba al tener que marcarla antes.
+    pantalla._seleccionados = {luis.id}
+
+    pantalla._eliminar(ana.id)
+    comun.confirmar_dialogo(app.page)
+
+    quedan = [s.id for s in db.listar_solicitudes(lote_id)]
+    assert quedan == [luis.id], quedan
+    assert pantalla._seleccionados == {luis.id}, "la selección no se toca"
+
+
+def probar_nueva_solicitud_pregunta_la_fuente():
+    """«Nueva solicitud» ofrece las fuentes y abre la que se elija"""
+    from ui.solicitudes import SeccionSolicitudes
+
+    app = comun.AppFalsa()
+    pantalla = SeccionSolicitudes(app)
+    pantalla.cargar_desde_db()
+
+    pantalla._nueva_solicitud()
+    assert app.page.dialogos, "debe preguntar de dónde sale la solicitud"
+
+    # La segunda opción es el alta desde carátulas; elegirla cierra el diálogo
+    # de fuentes y abre ese modal.
+    comun.elegir_del_dialogo(app.page, 1)
+    assert app.page.dialogos[-1] is pantalla.alta_caratulas.modal.dialogo
 
 
 # --------------------------------------------------------------------------- #
@@ -245,7 +377,7 @@ def _excel_de_prueba(carpeta: str) -> str:
              tipo_beneficiario="Acreedor", beneficiario_nombre="ANA LOPEZ RUIZ",
              beneficiario_rfc="XAXX010101000", forma_pago="Transferencia",
              tipo_gasto="No Deducible", cuenta_banco="BBVA",
-             cuenta_clabe="012345678901234567", fecha_pago="15/09/2026",
+             cuenta_clabe="012345678901234568", fecha_pago="15/09/2026",
              concepto_nombre="VIGILANCIA", importe="9500"),
         fila(empresa="Abastecedora", sucursal="Corporativo",
              tipo_beneficiario="Acreedor", beneficiario_nombre="LUIS DIAZ MORA",
@@ -289,7 +421,7 @@ def probar_carga_masiva_importa_lo_bueno():
     lote = comun.lote()
     carga.abrir(lote.id)
     carga._ruta = _excel_de_prueba(comun.carpeta_temporal())
-    _correr(carga._analizar())
+    comun.correr(carga._analizar())
 
     assert carga.previa.visible
     assert carga.btn_importar.text == "Importar 2", carga.btn_importar.text
@@ -310,7 +442,7 @@ def probar_reimportar_no_duplica():
     for _ in range(2):
         carga.abrir(lote.id)
         carga._ruta = ruta
-        _correr(carga._analizar())
+        comun.correr(carga._analizar())
         carga._importar()
     assert len(db.listar_solicitudes(lote.id)) == 2
     assert "ya existían" in app.ultimo_aviso
@@ -336,7 +468,10 @@ def probar_alta_desde_caratulas():
     modal.abrir(lote.id)
     modal.dd_empresa.value = "Abastecedora"
     modal.dd_sucursal.value = "Corporativo"
-    modal._cargar([carpeta])
+    # Los PDF de la prueba no son legibles: se comprueba de paso que un archivo
+    # que el OCR no puede leer NO tumba la carga, y que el nombre cae al
+    # respaldo del nombre del archivo.
+    comun.correr(modal._cargar([carpeta]))
 
     assert modal.btn_importar.text == "Dar de alta 2", modal.btn_importar.text
     # El que no se reconoció se corrige en la tabla.

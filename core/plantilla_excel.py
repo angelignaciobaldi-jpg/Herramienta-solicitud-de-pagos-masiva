@@ -104,7 +104,7 @@ CAMPOS: list[Campo] = [
     Campo("cuenta_clabe", "CLABE", ancho=22,
           ayuda="18 dígitos. Obligatoria para Transferencia. Déjala como TEXTO: "
                 "si Excel la vuelve número, pierde los ceros de la izquierda.",
-          ejemplo="012345678901234567",
+          ejemplo="012345678901234568",
           sinonimos=["clabe interbancaria", "clave interbancaria", "cuenta"]),
     Campo("cuenta_titular", "Nombre de la cuenta", ancho=30,
           ayuda="A nombre de quién está la cuenta. Si se omite, se usa el "

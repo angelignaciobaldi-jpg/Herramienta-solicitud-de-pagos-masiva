@@ -6,16 +6,21 @@ trabajo: el área recibe una carpeta con un archivo por persona, y esa carpeta y
 
 Tres pasos, con el Excel como paso opcional al final:
 
-1. Elegir las carátulas (archivos sueltos o una carpeta completa).
-2. Revisar los nombres que se extrajeron del nombre de cada archivo, y
-   corregir los que hagan falta —son editables en la propia tabla.
-3. Opcionalmente, cargar el Excel: sus filas se emparejan por nombre y
-   completan importe, fecha, concepto, CLABE y demás.
+1. Elegir las carátulas (archivos sueltos o una carpeta completa). De cada una
+   se lee la **CLABE** y el **titular** (`adaptadores/ocr_caratula.py`).
+2. Revisar lo que se leyó y corregir lo que haga falta —el beneficiario y la
+   CLABE son editables en la propia tabla.
+3. Opcionalmente, cargar el Excel: sus filas se emparejan **por CLABE** y
+   completan importe, fecha, concepto, RFC, correo y demás.
 
 Lo que este orden garantiza y el inverso no: **ninguna solicitud puede quedarse
 sin carátula**, porque no existe si no hay archivo. Como SIPP la exige para dar
 de alta la cuenta bancaria, eso elimina de raíz el caso que más trabajo manual
 generaba.
+
+Leer las carátulas cuesta segundos por archivo, así que el paso 1 corre en otro
+hilo, informa su avance y se puede detener. Sin eso, elegir una carpeta de
+cincuenta carátulas dejaría la ventana congelada un minuto sin explicar por qué.
 """
 
 from __future__ import annotations
@@ -25,9 +30,10 @@ import os
 
 import flet as ft
 
-from core import catalogos, db, documentos
+from core import catalogos, db, documentos, ocr
 from core.adaptadores import caratulas
 from core.adaptadores import excel as adaptador_excel
+from core.adaptadores import ocr_caratula
 from core.empresas import NOMBRES_EMPRESAS
 from ui.comun import GRIS, NARANJA, ROJO, VERDE, fmt_importe
 from ui.componentes import (Modal, boton_primario, boton_secundario,
@@ -36,12 +42,13 @@ from ui.tabla_responsiva import (DER, IZQ, ColumnaTabla, FilaDatos,
                                  TablaResponsiva)
 
 _COLUMNAS = [
-    ColumnaTabla("", 5),                             # semáforo
-    ColumnaTabla("Archivo", 24, IZQ),
-    ColumnaTabla("Beneficiario detectado", 25, IZQ),
-    ColumnaTabla("Empresa", 14, IZQ),
-    ColumnaTabla("Importe", 11, DER),
-    ColumnaTabla("Detalle", 21, IZQ),
+    ColumnaTabla("", 4),                             # semáforo
+    ColumnaTabla("Archivo", 17, IZQ),
+    ColumnaTabla("Beneficiario", 22, IZQ),
+    ColumnaTabla("CLABE", 17, IZQ),
+    ColumnaTabla("Banco", 10, IZQ),
+    ColumnaTabla("Importe", 10, DER),
+    ColumnaTabla("Detalle", 20, IZQ),
 ]
 
 
@@ -54,12 +61,24 @@ class AltaDesdeCaratulas:
         self._al_importar = al_importar
         self._borradores: list[caratulas.Borrador] = []
         self._lote_id = ""
+        self._leyendo = False
+        self._detener = False
         self._construir()
 
     # ------------------------------------------------------------ UI
     def _construir(self) -> None:
         # Paso 1 — carátulas.
         self.txt_archivos = ft.Text("Ninguna carátula elegida.", color=GRIS)
+        self.barra_lectura = ft.ProgressBar(value=0, visible=False)
+        self.btn_archivos = boton_secundario(
+            "Elegir archivos…", ft.Icons.PICTURE_AS_PDF,
+            on_click=self._elegir_archivos)
+        self.btn_carpeta = boton_secundario(
+            "Elegir carpeta…", ft.Icons.FOLDER_OPEN,
+            on_click=self._elegir_carpeta)
+        self.btn_detener = boton_secundario(
+            "Detener", ft.Icons.STOP, on_click=self._detener_lectura)
+        self.btn_detener.visible = False
         paso1 = tarjeta_seccion(ft.Column([
             ft.Row([ft.Icon(ft.Icons.ACCOUNT_BALANCE,
                             color=ft.Colors.PRIMARY_CONTAINER),
@@ -68,16 +87,15 @@ class AltaDesdeCaratulas:
                             color=ft.Colors.PRIMARY_CONTAINER)],
                    spacing=8, tight=True),
             ft.Text("Cada archivo se convierte en una solicitud, con su "
-                    "carátula ya adjunta. El nombre del beneficiario se toma "
-                    "del nombre del archivo.",
+                    "carátula ya adjunta. Se lee la CLABE y el titular de cada "
+                    "una: el titular es el beneficiario, y la CLABE es con lo "
+                    "que después se empareja el Excel.",
                     theme_style=ft.TextThemeStyle.BODY_MEDIUM, color=GRIS),
-            ft.Row([boton_secundario("Elegir archivos…", ft.Icons.PICTURE_AS_PDF,
-                                     on_click=self._elegir_archivos),
-                    boton_secundario("Elegir carpeta…", ft.Icons.FOLDER_OPEN,
-                                     on_click=self._elegir_carpeta),
+            ft.Row([self.btn_archivos, self.btn_carpeta, self.btn_detener,
                     self.txt_archivos],
                    spacing=12, vertical_alignment=ft.CrossAxisAlignment.CENTER,
                    wrap=True),
+            self.barra_lectura,
         ], spacing=10, tight=True))
 
         # Paso 2 — valores comunes.
@@ -105,6 +123,8 @@ class AltaDesdeCaratulas:
         # Paso 3 — Excel.
         self.txt_excel = ft.Text("Sin Excel: tendrás que completar importe, "
                                  "fecha y concepto a mano.", color=GRIS)
+        self.btn_excel = boton_secundario("Elegir Excel…", ft.Icons.UPLOAD_FILE,
+                                          on_click=self._elegir_excel)
         paso3 = tarjeta_seccion(ft.Column([
             ft.Row([ft.Icon(ft.Icons.TABLE_VIEW,
                             color=ft.Colors.PRIMARY_CONTAINER),
@@ -112,20 +132,18 @@ class AltaDesdeCaratulas:
                             theme_style=ft.TextThemeStyle.LABEL_LARGE,
                             color=ft.Colors.PRIMARY_CONTAINER)],
                    spacing=8, tight=True),
-            ft.Text("Sus filas se emparejan por nombre con las carátulas y "
-                    "rellenan lo que falte. El nombre del beneficiario NO se "
-                    "sobrescribe: manda el de la carátula, que es la que "
-                    "acredita la cuenta.",
+            ft.Text("Sus filas se emparejan con las carátulas por CLABE, y por "
+                    "nombre las que no tengan CLABE de los dos lados. Ni el "
+                    "beneficiario ni la cuenta se sobrescriben: manda la "
+                    "carátula, que es la que acredita a quién se le paga.",
                     theme_style=ft.TextThemeStyle.BODY_MEDIUM, color=GRIS),
-            ft.Row([boton_secundario("Elegir Excel…", ft.Icons.UPLOAD_FILE,
-                                     on_click=self._elegir_excel),
-                    self.txt_excel],
+            ft.Row([self.btn_excel, self.txt_excel],
                    spacing=12, vertical_alignment=ft.CrossAxisAlignment.CENTER),
         ], spacing=10, tight=True))
 
         # Vista previa.
         self.txt_resumen = ft.Text("", theme_style=ft.TextThemeStyle.BODY_LARGE)
-        self.tabla = TablaResponsiva(self.page, _COLUMNAS, ancho_inicial=900)
+        self.tabla = TablaResponsiva(self.page, _COLUMNAS, ancho_inicial=1000)
         self.previa = ft.Column(
             [ft.Row([ft.Icon(ft.Icons.FACT_CHECK,
                              color=ft.Colors.PRIMARY_CONTAINER),
@@ -143,8 +161,9 @@ class AltaDesdeCaratulas:
         self.btn_importar.disabled = True
 
         self.modal = Modal(
-            self.page, "Alta desde carátulas", subtitulo="una carátula, una solicitud",
-            ancho=960, alto_cuerpo=520,
+            self.page, "Alta desde carátulas",
+            subtitulo="una carátula, una solicitud",
+            ancho=1060, alto_cuerpo=520,
             acciones=[
                 boton_secundario("Cerrar",
                                  on_click=lambda _e: self.modal.cerrar()),
@@ -156,6 +175,8 @@ class AltaDesdeCaratulas:
     def abrir(self, lote_id: str) -> None:
         self._lote_id = lote_id
         self._borradores = []
+        self._detener = False
+        self._modo_lectura(False)
         self.txt_archivos.value = "Ninguna carátula elegida."
         self.txt_archivos.color = GRIS
         self.txt_excel.value = ("Sin Excel: tendrás que completar importe, "
@@ -164,47 +185,131 @@ class AltaDesdeCaratulas:
         self.previa.visible = False
         self.btn_importar.disabled = True
         self.btn_importar.text = "Dar de alta"
+        # Sin Tesseract se puede seguir trabajando —las carátulas en PDF traen
+        # capa de texto—, pero las fotos no se van a poder leer y es mejor
+        # decirlo antes de elegir la carpeta que después de esperar por ella.
+        if not ocr.tesseract_disponible():
+            self.txt_archivos.value = (
+                "Sin Tesseract instalado: se leerán los PDF con texto, pero no "
+                "las fotos ni los escaneos.")
+            self.txt_archivos.color = NARANJA
         self.modal.abrir()
 
     # -------------------------------------------------------- carátulas
     async def _elegir_archivos(self, _e=None) -> None:
+        if self._leyendo:
+            return
         seleccion = await self.app.picker.pick_files(
             dialog_title="Elige las carátulas bancarias", allow_multiple=True,
             allowed_extensions=["pdf", "jpg", "jpeg", "png"])
         if not seleccion:
             return
-        self._cargar([a.path for a in seleccion])
+        await self._cargar([a.path for a in seleccion])
 
     async def _elegir_carpeta(self, _e=None) -> None:
+        if self._leyendo:
+            return
         carpeta = await self.app.picker.get_directory_path(
             dialog_title="Elige la carpeta con las carátulas")
         if not carpeta:
             return
-        self._cargar([carpeta])
+        await self._cargar([carpeta])
 
-    def _cargar(self, rutas: list[str]) -> None:
-        self._borradores = caratulas.crear_borradores(
-            rutas, self._lote_id,
-            empresa=self.dd_empresa.value or "",
-            sucursal=self.dd_sucursal.value or "",
-            tipo_beneficiario=self.dd_tipo.value or "Acreedor")
+    def _detener_lectura(self, _e=None) -> None:
+        self._detener = True
+        self.txt_archivos.value = "Deteniendo al terminar la carátula en curso…"
+        self.modal.refrescar()
+
+    def _modo_lectura(self, activo: bool) -> None:
+        """Bloquea lo que no debe tocarse mientras se leen las carátulas."""
+        self._leyendo = activo
+        self.btn_archivos.disabled = activo
+        self.btn_carpeta.disabled = activo
+        self.btn_excel.disabled = activo
+        self.btn_detener.visible = activo
+        self.barra_lectura.visible = activo
+        if activo:
+            self.btn_importar.disabled = True
+
+    async def _cargar(self, rutas: list[str]) -> None:
+        """Lee las carátulas en otro hilo, informando el avance.
+
+        El OCR de una carátula toma segundos, y una carpeta trae decenas. Correr
+        esto en el hilo de la interfaz congelaría la ventana sin decir por qué,
+        que es indistinguible de que la app se colgó.
+        """
+        self._detener = False
+        self._modo_lectura(True)
+        self.txt_archivos.value = "Leyendo las carátulas…"
+        self.txt_archivos.color = GRIS
+        self.barra_lectura.value = None      # indeterminada hasta saber cuántas
+        self.modal.refrescar()
+
+        bucle = asyncio.get_running_loop()
+
+        def progreso(hechas: int, total: int, archivo: str) -> None:
+            def aplicar() -> None:
+                self.barra_lectura.value = hechas / total if total else None
+                self.txt_archivos.value = (
+                    f"Leyendo {hechas} de {total}: {archivo}")
+                self.modal.refrescar()
+            bucle.call_soon_threadsafe(aplicar)
+
+        try:
+            self._borradores = await asyncio.to_thread(
+                caratulas.crear_borradores, rutas, self._lote_id,
+                empresa=self.dd_empresa.value or "",
+                sucursal=self.dd_sucursal.value or "",
+                tipo_beneficiario=self.dd_tipo.value or "Acreedor",
+                on_progreso=progreso, cancelado=lambda: self._detener)
+        except Exception as exc:  # noqa: BLE001 — se reporta, el modal sigue vivo
+            self._borradores = []
+            self.txt_archivos.value = f"No se pudieron leer las carátulas: {exc}"
+            self.txt_archivos.color = ROJO
+        finally:
+            self._modo_lectura(False)
+
         if not self._borradores:
-            self.txt_archivos.value = ("No se encontraron archivos válidos "
-                                       "(PDF, JPG o PNG).")
-            self.txt_archivos.color = NARANJA
+            if self.txt_archivos.color is not ROJO:
+                self.txt_archivos.value = ("No se encontraron archivos válidos "
+                                           "(PDF, JPG o PNG).")
+                self.txt_archivos.color = NARANJA
             self.previa.visible = False
             self.btn_importar.disabled = True
             self.modal.refrescar()
             return
-        sin_nombre = sum(1 for b in self._borradores if not b.nombre_detectado)
-        self.txt_archivos.value = f"{len(self._borradores)} carátula(s)"
-        self.txt_archivos.color = GRIS
-        if sin_nombre:
-            self.txt_archivos.value += (
-                f" · {sin_nombre} sin nombre reconocible: escríbelo en la tabla")
-            self.txt_archivos.color = NARANJA
+
+        self.txt_archivos.value = self._resumen_lectura()
         self._pintar()
         self.modal.refrescar()
+
+    def _resumen_lectura(self) -> str:
+        """Qué se pudo leer de las carátulas, contado por lo accionable.
+
+        Se separan «sin CLABE» y «CLABE dudosa» porque piden cosas distintas:
+        la primera hay que teclearla, la segunda solo verificarla contra el
+        documento —y a veces está bien, porque hay bancos que imprimen la CLABE
+        con un dígito que el OCR confunde—.
+        """
+        total = len(self._borradores)
+        sin_clabe = sum(1 for b in self._borradores
+                        if not b.solicitud.cuenta_clabe)
+        dudosas = sum(1 for b in self._borradores
+                      if b.solicitud.cuenta_clabe and not b.clabe_confiable)
+        sin_nombre = sum(1 for b in self._borradores if not b.nombre_detectado)
+
+        partes = [f"{total} carátula(s)"]
+        if sin_clabe:
+            partes.append(f"{sin_clabe} sin CLABE: escríbela en la tabla")
+        if dudosas:
+            partes.append(f"{dudosas} con CLABE dudosa: verifícala")
+        if sin_nombre:
+            partes.append(f"{sin_nombre} sin beneficiario: escríbelo")
+        self.txt_archivos.color = (
+            GRIS if not (sin_clabe or dudosas or sin_nombre) else NARANJA)
+        if self._detener:
+            partes.append("lectura detenida por ti")
+        return " · ".join(partes)
 
     def _aplicar_comunes(self, _e=None) -> None:
         """Vuelca los valores comunes sobre los borradores que no los tengan."""
@@ -245,6 +350,16 @@ class AltaDesdeCaratulas:
                                                 importacion.filas)
         partes = [f"{resumen['emparejados']} de {len(self._borradores)} "
                   f"carátulas completadas"]
+        # Se dice CÓMO emparejó cada una: por CLABE no hay duda de que la fila
+        # es de esa persona; por nombre sí puede haberla, y conviene que se note
+        # la diferencia sin tener que abrir la tabla.
+        if resumen["por_clabe"]:
+            partes.append(f"{resumen['por_clabe']} por CLABE")
+        if resumen["por_nombre"]:
+            partes.append(f"{resumen['por_nombre']} por nombre")
+        if resumen["discrepancias"]:
+            partes.append(f"{resumen['discrepancias']} con la CLABE del Excel "
+                          f"distinta: revísalas")
         if resumen["sin_excel"]:
             partes.append(f"{len(resumen['sin_excel'])} sin fila en el Excel")
         if resumen["sin_caratula"]:
@@ -254,39 +369,72 @@ class AltaDesdeCaratulas:
             partes.append(f"{len(resumen['sin_caratula'])} fila(s) sin carátula "
                           f"({muestra})")
         self.txt_excel.value = " · ".join(partes)
-        self.txt_excel.color = VERDE if not resumen["sin_excel"] else NARANJA
+        self.txt_excel.color = (
+            ROJO if resumen["discrepancias"]
+            else NARANJA if resumen["sin_excel"] else VERDE)
         self._pintar()
         self.modal.refrescar()
 
     # ---------------------------------------------------- vista previa
+    def _semaforo(self, b: caratulas.Borrador) -> tuple:
+        """Ícono, color y detalle de una carátula.
+
+        El orden de los casos es el de la gravedad, y no es arbitrario: primero
+        lo que impide dar de alta (sin beneficiario), luego lo que puede hacer
+        que se pague a quien no es (CLABE dudosa o discrepante), y solo al final
+        lo que nada más falta por llenar.
+        """
+        hallazgos = b.hallazgos
+        errores = [h.mensaje for h in hallazgos if h.es_error]
+        if not b.nombre_detectado:
+            return (ft.Icons.HELP_OUTLINE, ROJO,
+                    "No se reconoció el beneficiario: escríbelo aquí →")
+        if b.avisos:
+            return ft.Icons.WARNING_AMBER, NARANJA, b.avisos[0]
+        if b.solicitud.cuenta_clabe and not b.clabe_confiable:
+            return (ft.Icons.WARNING_AMBER, NARANJA,
+                    "La CLABE no pasa su dígito verificador: verifícala.")
+        if errores:
+            return ft.Icons.ERROR, ROJO, f"{len(errores)}: {errores[0]}"
+        if b.emparejado_por == caratulas.POR_CLABE:
+            return (ft.Icons.CHECK_CIRCLE, VERDE,
+                    "Completa con el Excel, emparejada por CLABE.")
+        if b.emparejado_por == caratulas.POR_NOMBRE:
+            return (ft.Icons.CHECK_CIRCLE, VERDE,
+                    "Completa con el Excel, emparejada por nombre.")
+        return ft.Icons.CHECK_CIRCLE, VERDE, "Lista."
+
     def _pintar(self) -> None:
         filas = []
         for b in self._borradores:
-            hallazgos = b.hallazgos
-            errores = [h.mensaje for h in hallazgos if h.es_error]
-            if not b.nombre_detectado:
-                icono, color = ft.Icons.HELP_OUTLINE, ROJO
-                detalle = "No se reconoció el nombre: escríbelo aquí →"
-            elif errores:
-                icono, color = ft.Icons.ERROR, ROJO
-                detalle = f"{len(errores)}: {errores[0]}"
-            elif b.completado:
-                icono, color = ft.Icons.CHECK_CIRCLE, VERDE
-                detalle = "Completa con datos del Excel."
-            else:
-                icono, color = ft.Icons.CHECK_CIRCLE, VERDE
-                detalle = "Lista."
+            icono, color, detalle = self._semaforo(b)
+            tips = [h.mensaje for h in b.hallazgos] + b.avisos
+            marca = ("leído de la carátula"
+                     if b.origen_nombre == caratulas.NOMBRE_DE_OCR else
+                     "escrito por ti"
+                     if b.origen_nombre == caratulas.NOMBRE_A_MANO else
+                     "deducido del nombre del archivo")
             filas.append(FilaDatos([
                 ft.Icon(icono, size=18, color=color,
-                        tooltip="\n".join(h.mensaje for h in hallazgos) or None),
+                        tooltip="\n".join(tips) or None),
                 ft.Text(b.archivo, size=12, no_wrap=True,
                         overflow=ft.TextOverflow.ELLIPSIS, tooltip=b.ruta),
-                # Editable: la extracción del nombre puede fallar y corregirla
-                # aquí es más rápido que renombrar el archivo y volver a cargar.
+                # Editable: la lectura puede fallar y corregirla aquí es más
+                # rápido que renombrar el archivo y volver a cargar.
                 campo_tabla_texto(
                     valor=b.solicitud.beneficiario_nombre,
+                    tooltip=f"Beneficiario {marca}",
                     on_blur=lambda e, br=b: self._renombrar(br, e.control.value)),
-                b.solicitud.empresa or "—",
+                # También editable, y por la misma razón de peso: es el dato del
+                # que depende a quién se le paga, y si el OCR lo leyó mal hay que
+                # poder arreglarlo sin salir de aquí.
+                campo_tabla_texto(
+                    valor=b.solicitud.cuenta_clabe,
+                    tooltip=("CLABE de la carátula. Con ella se empareja el "
+                             "Excel."),
+                    on_blur=lambda e, br=b: self._recapturar_clabe(
+                        br, e.control.value)),
+                b.solicitud.cuenta_banco or "—",
                 fmt_importe(b.solicitud.importe_total),
                 detalle,
             ]))
@@ -299,8 +447,9 @@ class AltaDesdeCaratulas:
             f"{len(self._borradores) - len(listos)} incompleta(s)")
         self.txt_resumen.color = VERDE if listos else NARANJA
         # Se pueden dar de alta TODAS, completas o no: el borrador incompleto
-        # sigue siendo útil —ya tiene beneficiario y carátula— y se termina de
-        # llenar en la tabla principal. Lo que no se puede es no tener nombre.
+        # sigue siendo útil —ya tiene beneficiario, cuenta y carátula— y se
+        # termina de llenar en la tabla principal. Lo que no se puede es no
+        # tener nombre.
         con_nombre = [b for b in self._borradores if b.nombre_detectado]
         self.btn_importar.text = f"Dar de alta {len(con_nombre)}"
         self.btn_importar.disabled = not con_nombre
@@ -312,8 +461,30 @@ class AltaDesdeCaratulas:
             return
         borrador.nombre_detectado = nombre
         borrador.solicitud.beneficiario_nombre = nombre
-        if not borrador.solicitud.cuenta_titular:
-            borrador.solicitud.cuenta_titular = nombre
+        borrador.origen_nombre = caratulas.NOMBRE_A_MANO
+        # El titular de la cuenta acompaña al beneficiario: son la misma persona
+        # y en SIPP se capturan como tal. Se reescribe aunque ya tuviera valor,
+        # porque el que había venía de la misma lectura que se acaba de corregir.
+        borrador.solicitud.cuenta_titular = nombre
+        self._pintar()
+        self.modal.refrescar()
+
+    def _recapturar_clabe(self, borrador: caratulas.Borrador,
+                          clabe: str) -> None:
+        """Corrige a mano la CLABE que leyó el OCR.
+
+        Al cambiarla se borran los avisos de la lectura anterior: hablaban de
+        una CLABE que ya no es la de esta solicitud, y dejarlos ahí haría dudar
+        del dato que el usuario acaba de verificar contra el documento.
+        """
+        limpia = "".join(c for c in (clabe or "") if c.isdigit())
+        if limpia == borrador.solicitud.cuenta_clabe:
+            return
+        borrador.solicitud.cuenta_clabe = limpia
+        borrador.solicitud.cuenta_banco = (
+            ocr_caratula.banco_de_clabe(limpia)
+            or borrador.solicitud.cuenta_banco)
+        borrador.avisos = []
         self._pintar()
         self.modal.refrescar()
 

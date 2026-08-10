@@ -52,6 +52,29 @@ class Hallazgo:
         return self.severidad == ERROR
 
 
+def clabe_valida(clabe: str) -> bool:
+    """True si la CLABE tiene 18 dígitos y su dígito verificador cuadra.
+
+    El algoritmo es el de la ABM: los primeros 17 dígitos se multiplican por los
+    pesos 3, 7 y 1 en ciclo, se toma el módulo 10 de cada producto, se suman, y
+    el verificador es el complemento a 10 de esa suma.
+
+    Vive aquí y no en el adaptador de carátulas porque es una regla del dato, no
+    de cómo se obtuvo: vale igual para una CLABE tecleada a mano, traída de un
+    Excel o leída por el OCR. El adaptador la reexporta.
+
+    Es la única comprobación que distingue una CLABE con un dígito equivocado de
+    una correcta: las dos tienen 18 dígitos y las dos «se ven bien». Sin ella, el
+    error solo aparece cuando el dinero ya salió a otra cuenta.
+    """
+    clabe = (clabe or "").strip()
+    if len(clabe) != 18 or not clabe.isdigit():
+        return False
+    pesos = (3, 7, 1)
+    suma = sum((int(d) * pesos[i % 3]) % 10 for i, d in enumerate(clabe[:17]))
+    return (10 - (suma % 10)) % 10 == int(clabe[17])
+
+
 def validar(solicitud: Solicitud, partidas: list[Partida]) -> list[Hallazgo]:
     """Devuelve todos los hallazgos de una solicitud (lista vacía = está lista).
 
@@ -115,6 +138,15 @@ def validar(solicitud: Solicitud, partidas: list[Partida]) -> list[Hallazgo]:
         elif not _CLABE.match(clabe):
             h.append(Hallazgo("cuenta_clabe",
                               "La CLABE debe tener exactamente 18 dígitos."))
+        elif not clabe_valida(clabe):
+            # Tiene la forma correcta pero el verificador no cuadra: sobra o
+            # falta un dígito, o hay uno cambiado. Bloquea, porque es el único
+            # momento en que ese error se puede ver —después ya se pagó, y a
+            # otra cuenta—. El mensaje dice qué revisar, no solo que está mal.
+            h.append(Hallazgo(
+                "cuenta_clabe",
+                "La CLABE tiene 18 dígitos pero no pasa su dígito verificador: "
+                "hay alguno mal. Revísala contra la carátula."))
         if solicitud.beneficiario_nuevo and not solicitud.cuenta_banco.strip():
             h.append(Hallazgo(
                 "cuenta_banco",

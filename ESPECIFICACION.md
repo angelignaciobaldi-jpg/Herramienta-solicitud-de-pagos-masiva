@@ -400,8 +400,15 @@ Se ejecutan antes de encolar y se vuelven a ejecutar al editar en la tabla:
 - Centro de costos y cuenta contable existen (solo partidas `INSUMO`).
 - **Al menos un renglón del desglose que le corresponde al tipo de
   beneficiario**, con importe > 0 (ver la regla 1 del modelo).
-- Si la forma de pago es Transferencia: CLABE presente y con 18 dígitos, y
-  carátula localizada.
+- Si la forma de pago es Transferencia: CLABE presente, con 18 dígitos y **con
+  su dígito verificador correcto** (algoritmo de la ABM, pesos 3·7·1, en
+  `validador.clabe_valida`), y carátula localizada.
+
+  El verificador es la única regla que distingue una CLABE con un dígito
+  equivocado de una correcta: las dos miden 18, las dos son todo dígitos y las
+  dos empiezan con un código de banco real. Si no se comprueba aquí, el error
+  aparece cuando el dinero ya salió a otra cuenta. Aplica igual venga la CLABE
+  del OCR de una carátula, de un Excel o tecleada a mano.
 
 El modal de asignación masiva **usa el mismo validador**. No debe existir un
 camino corto que lo evite.

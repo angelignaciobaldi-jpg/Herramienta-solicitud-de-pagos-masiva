@@ -236,7 +236,7 @@ async def _principal(page: ft.Page) -> None:
                     beneficiario_nombre=NOMBRE_PRUEBA,
                     beneficiario_rfc="XAXX010101000",
                     beneficiario_correo="x@ejemplo.invalid",
-                    cuenta_clabe="012345678901234567", cuenta_banco="BBVA",
+                    cuenta_clabe="012345678901234568", cuenta_banco="BBVA",
                     forma_pago="Transferencia", tipo_gasto="No Deducible",
                     fecha_pago="20/09/2026", descripcion="Prueba de render")
                 solicitud = db.guardar_solicitud(

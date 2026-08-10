@@ -275,7 +275,11 @@ class AsignacionMasiva:
         if incompletas:
             mensaje += (f" {incompletas} siguen incompletas por otros campos y "
                         f"el robot no las capturará hasta corregirlas.")
-        mensaje += " Puedes deshacerlo desde el botón «Deshacer» del lote."
+        # Este aviso es el ÚNICO lugar desde donde se revierte la operación
+        # completa: en la tabla, deshacer actúa sobre una solicitud a la vez.
+        # Por eso dura más de lo normal en pantalla y lo dice explícitamente.
+        mensaje += (" Deshazlo aquí para revertir todo, o desde el ícono ↺ de "
+                    "cada fila para revertir solo esa.")
         self.app.avisar(
             mensaje, NARANJA if incompletas else VERDE,
             accion="Deshacer", on_accion=self._deshacer_desde_aviso,
