@@ -32,11 +32,16 @@ el instalador: eso es parte de la fase 7.
 Verificación de que nada quedó roto:
 
 ```powershell
-python scripts/probar.py              # las pruebas de lógica (lo primero que corres)
+python scripts/probar.py              # las pruebas de lógica (lo exige el CI)
 python scripts/smoke_import.py        # imports (lo exige el CI)
 python scripts/smoke_render.py        # abre la app y pinta cada pantalla
 python scripts/prueba_rpa_fixtures.py # el mapa de selectores vs. las páginas reales
 ```
+
+Los dos primeros los corre también el CI al publicar un Release, así que un
+Release no se compila si alguno falla. Los otros dos siguen siendo manuales:
+`smoke_render.py` necesita sesión de escritorio y `prueba_rpa_fixtures.py`
+depende de las páginas del portal, que no se versionan.
 
 `probar.py` corre las suites de [scripts/pruebas/](scripts/pruebas/) —datos,
 ingesta, catálogo, asignación e interfaz— sin abrir ventana ni tocar SIPP, con

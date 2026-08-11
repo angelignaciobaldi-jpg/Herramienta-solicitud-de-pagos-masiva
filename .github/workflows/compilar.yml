@@ -81,6 +81,20 @@ jobs:
         shell: pwsh
         run: python scripts/smoke_import.py
 
+      # Pruebas de logica (scripts/pruebas/): datos, ingesta, catalogo, asignacion
+      # e interfaz. Van despues del smoke de imports porque este es mas barato y
+      # caza lo mas grueso primero.
+      #
+      # Estas SI pueden correr en CI: no abren ventana, no tocan SIPP y usan una
+      # base temporal por prueba. Las que leen caratulas generan su propio PDF con
+      # capa de texto, asi que tampoco dependen de que Tesseract este instalado
+      # —el runner no lo trae—. Lo que NO puede correr aqui es smoke_render.py,
+      # que necesita sesion de escritorio para abrir la ventana de verdad; ese
+      # sigue siendo manual antes de publicar (ver README).
+      - name: Pruebas de logica (falla si alguna no pasa)
+        shell: pwsh
+        run: python scripts/probar.py
+
       # 1. Compilar la app con flet pack (onedir). Incluye el driver de Playwright
       #    via --collect-all. NO empaqueta Chromium: se descarga en la 1ra
       #    ejecución del RPA en la PC del usuario. Imagenes sí va (versionada).
