@@ -46,7 +46,7 @@ CONCEPTO_PRUEBA = "VIGILANCIA"      # de una sola palabra: no puede ser ambiguo
 # nunca se pulsa Guardar, no llega a registrarse en el catálogo de SIPP.
 BENEFICIARIO = "PRUEBA RPA NO GUARDAR"
 RFC_PRUEBA = "PRU010101AB1"
-CLABE_PRUEBA = "012345678901234567"
+CLABE_PRUEBA = "012345678901234568"
 
 
 def _bitacora(paso: str, mensaje: str, nivel: str, _captura: str) -> None:

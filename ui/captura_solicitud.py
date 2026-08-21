@@ -25,7 +25,7 @@ from core.empresas import NOMBRES_EMPRESAS
 from ui.comun import GRIS, NARANJA, ROJO, VERDE, fmt_importe, parse_importe
 from ui.componentes import (CampoFecha, Modal, boton_herramienta,
                             boton_primario, boton_secundario, campo_opciones,
-                            campo_texto, seccion_formulario)
+                            campo_texto, icono_accion, seccion_formulario)
 
 
 class _RenglonPartida:
@@ -219,6 +219,17 @@ class CapturaSolicitud:
         self._archivos: dict[str, str] = {}
         self.txt_caratula = ft.Text("Sin archivo.", size=12, color=GRIS)
         self.txt_vobo = ft.Text("Sin archivo.", size=12, color=GRIS)
+        # Ver el archivo adjunto, no solo su nombre: es como se comprueba que la
+        # CLABE capturada sea la que dice la carátula, que es el error que más
+        # caro sale de esta pantalla.
+        self.btn_ver_caratula = icono_accion(
+            ft.Icons.VISIBILITY, "Ver la carátula adjunta",
+            lambda _e: self._ver(documentos.TIPO_CARATULA))
+        self.btn_ver_caratula.visible = False
+        self.btn_ver_vobo = icono_accion(
+            ft.Icons.VISIBILITY, "Ver el Vo.Bo. adjunto",
+            lambda _e: self._ver(documentos.TIPO_VOBO))
+        self.btn_ver_vobo.visible = False
         self.bloque_archivos = ft.Column([
             ft.Row([ft.Icon(ft.Icons.ATTACH_FILE, size=20,
                             color=ft.Colors.PRIMARY_CONTAINER),
@@ -227,11 +238,11 @@ class CapturaSolicitud:
                    spacing=8, tight=True),
             ft.Row([boton_secundario("Carátula bancaria…", ft.Icons.UPLOAD_FILE,
                                      on_click=self._elegir_caratula),
-                    self.txt_caratula],
+                    self.btn_ver_caratula, self.txt_caratula],
                    spacing=12, vertical_alignment=ft.CrossAxisAlignment.CENTER),
             ft.Row([boton_secundario("Vo.Bo. de Compras…", ft.Icons.UPLOAD_FILE,
                                      on_click=self._elegir_vobo),
-                    self.txt_vobo],
+                    self.btn_ver_vobo, self.txt_vobo],
                    spacing=12, vertical_alignment=ft.CrossAxisAlignment.CENTER),
             ft.Text("La carátula es obligatoria al dar de alta un beneficiario "
                     "nuevo con transferencia: SIPP no registra la cuenta sin "
@@ -367,12 +378,29 @@ class CapturaSolicitud:
         await self._elegir_archivo(documentos.TIPO_VOBO,
                                    "Elige el Vo.Bo. de Compras")
 
+    def _ver(self, tipo: str) -> None:
+        """Abre el documento adjunto en el visor del sistema."""
+        ruta = self._archivos.get(tipo, "")
+        if not ruta:
+            return
+        if not os.path.exists(ruta):
+            # El archivo se guarda por RUTA: si alguien movió la carpeta de
+            # origen, el registro queda apuntando a la nada. Es mejor decirlo
+            # que abrir un visor con un error del sistema.
+            self.app.avisar(
+                f"El archivo ya no está en {ruta}. Vuelve a adjuntarlo.", ROJO)
+            return
+        self.app.abrir_en_sistema(ruta)
+
     def _pintar_archivos(self) -> None:
-        for tipo, etiqueta in ((documentos.TIPO_CARATULA, self.txt_caratula),
-                               (documentos.TIPO_VOBO, self.txt_vobo)):
+        for tipo, etiqueta, boton in (
+                (documentos.TIPO_CARATULA, self.txt_caratula,
+                 self.btn_ver_caratula),
+                (documentos.TIPO_VOBO, self.txt_vobo, self.btn_ver_vobo)):
             ruta = self._archivos.get(tipo, "")
             etiqueta.value = os.path.basename(ruta) if ruta else "Sin archivo."
             etiqueta.color = VERDE if ruta else GRIS
+            boton.visible = bool(ruta)
         # La carátula solo se usa al dar de alta la cuenta de un beneficiario
         # que no exista en SIPP, y eso se sabe al capturar, no aquí. Se avisa
         # sin afirmar que sea obligatoria.
@@ -461,6 +489,14 @@ class CapturaSolicitud:
             self.txt_hallazgos.color = ROJO
             self.txt_hallazgos.visible = True
             self.modal.refrescar()
+            # El texto vive dentro del cuerpo del modal, que tiene scroll: si
+            # el formulario está desplazado, el motivo queda fuera de vista y
+            # «Guardar» parece no hacer nada. El aviso flotante sí se ve
+            # siempre, y es la diferencia entre «no guardó y sé por qué» y
+            # «no guardó y no sé qué pasó».
+            self.app.avisar(
+                f"No se guardó: {validador.resumen(hallazgos)}", ROJO,
+                duracion=9000)
             return
         if hallazgos:  # solo avisos: se guarda, pero el usuario se entera
             self.app.avisar(validador.resumen(hallazgos), NARANJA)

@@ -1,9 +1,16 @@
 """Validaciones previas a encolar una solicitud (ESPECIFICACION.md §7).
 
-Se ejecutan al capturar, al importar y al editar en la tabla. Regla de oro: el
-modal de asignación masiva usa ESTE mismo validador. No debe existir un camino
-corto que lo evite, porque un lote se lanza sin supervisión y un dato malo se
-convierte en una solicitud mal capturada en el ERP.
+Se ejecutan al capturar, al importar y al editar en la tabla. Regla de oro: no
+existe un camino que llegue a SIPP sin pasar por aquí. Un lote se lanza sin
+supervisión y un dato malo se convierte en una solicitud mal capturada en el ERP.
+
+Dónde se hace cumplir importa. La puerta que de verdad cierra es
+`rpa_sipp.procesar_lote`, que valida todo el lote antes de abrir el navegador y
+manda a REVISAR lo que esté incompleto. Las pantallas que editan una solicitud
+usan el validador para AVISAR, y solo bloquean por lo que ellas mismas escriben:
+la asignación masiva, por ejemplo, no se niega a poner un concepto porque falte
+la CLABE —un campo que ese modal ni toca ni puede corregir—, porque eso dejaría
+al usuario sin salida sin evitar ningún riesgo.
 
 Aquí solo viven las reglas que se pueden comprobar **sin abrir SIPP**. Las que
 requieren consultar catálogos en vivo —que el beneficiario exista, que el
@@ -31,6 +38,11 @@ _CLABE = re.compile(r"^\d{18}$")
 ERROR = "ERROR"
 AVISO = "AVISO"
 
+# Códigos de hallazgo. Existen para que quien consume la validación pueda
+# distinguir un problema concreto SIN mirar el texto del mensaje, que está
+# escrito para leerse y puede reescribirse en cualquier momento.
+IMPORTE_EN_CERO = "importe_en_cero"
+
 
 @dataclass
 class Hallazgo:
@@ -39,10 +51,34 @@ class Hallazgo:
     campo: str
     mensaje: str
     severidad: str = ERROR
+    codigo: str = ""
 
     @property
     def es_error(self) -> bool:
         return self.severidad == ERROR
+
+
+def clabe_valida(clabe: str) -> bool:
+    """True si la CLABE tiene 18 dígitos y su dígito verificador cuadra.
+
+    El algoritmo es el de la ABM: los primeros 17 dígitos se multiplican por los
+    pesos 3, 7 y 1 en ciclo, se toma el módulo 10 de cada producto, se suman, y
+    el verificador es el complemento a 10 de esa suma.
+
+    Vive aquí y no en el adaptador de carátulas porque es una regla del dato, no
+    de cómo se obtuvo: vale igual para una CLABE tecleada a mano, traída de un
+    Excel o leída por el OCR. El adaptador la reexporta.
+
+    Es la única comprobación que distingue una CLABE con un dígito equivocado de
+    una correcta: las dos tienen 18 dígitos y las dos «se ven bien». Sin ella, el
+    error solo aparece cuando el dinero ya salió a otra cuenta.
+    """
+    clabe = (clabe or "").strip()
+    if len(clabe) != 18 or not clabe.isdigit():
+        return False
+    pesos = (3, 7, 1)
+    suma = sum((int(d) * pesos[i % 3]) % 10 for i, d in enumerate(clabe[:17]))
+    return (10 - (suma % 10)) % 10 == int(clabe[17])
 
 
 def validar(solicitud: Solicitud, partidas: list[Partida]) -> list[Hallazgo]:
@@ -108,6 +144,15 @@ def validar(solicitud: Solicitud, partidas: list[Partida]) -> list[Hallazgo]:
         elif not _CLABE.match(clabe):
             h.append(Hallazgo("cuenta_clabe",
                               "La CLABE debe tener exactamente 18 dígitos."))
+        elif not clabe_valida(clabe):
+            # Tiene la forma correcta pero el verificador no cuadra: sobra o
+            # falta un dígito, o hay uno cambiado. Bloquea, porque es el único
+            # momento en que ese error se puede ver —después ya se pagó, y a
+            # otra cuenta—. El mensaje dice qué revisar, no solo que está mal.
+            h.append(Hallazgo(
+                "cuenta_clabe",
+                "La CLABE tiene 18 dígitos pero no pasa su dígito verificador: "
+                "hay alguno mal. Revísala contra la carátula."))
         if solicitud.beneficiario_nuevo and not solicitud.cuenta_banco.strip():
             h.append(Hallazgo(
                 "cuenta_banco",
@@ -169,17 +214,20 @@ def validar(solicitud: Solicitud, partidas: list[Partida]) -> list[Hallazgo]:
             h.append(Hallazgo("partidas", f"Concepto {i}: falta el nombre."))
         if p.importe <= 0:
             h.append(Hallazgo(
-                "partidas", f"Concepto {i}: el importe debe ser mayor que cero."))
+                "partidas", f"Concepto {i}: el importe debe ser mayor que cero.",
+                codigo=IMPORTE_EN_CERO))
     for i, p in enumerate(insumos, 1):
         if not (p.insumo_nombre.strip() or p.insumo_id.strip()):
             h.append(Hallazgo("partidas", f"Insumo {i}: falta el insumo."))
         if p.importe <= 0:
             h.append(Hallazgo(
-                "partidas", f"Insumo {i}: el importe debe ser mayor que cero."))
+                "partidas", f"Insumo {i}: el importe debe ser mayor que cero.",
+                codigo=IMPORTE_EN_CERO))
 
     total = total_desglose(solicitud.tipo_beneficiario, partidas)
     if esperadas and total <= 0:
-        h.append(Hallazgo("partidas", f"El total de {nombre_clase} quedó en cero."))
+        h.append(Hallazgo("partidas", f"El total de {nombre_clase} quedó en cero.",
+                          codigo=IMPORTE_EN_CERO))
 
     return h
 

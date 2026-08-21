@@ -158,7 +158,7 @@ def probar_validador_acepta_una_solicitud_completa():
         tipo_beneficiario="Acreedor", beneficiario_nombre="ANA LOPEZ",
         beneficiario_rfc="XAXX010101000",
         beneficiario_correo="a@ejemplo.invalid",
-        cuenta_clabe="012345678901234567", cuenta_banco="BBVA",
+        cuenta_clabe="012345678901234568", cuenta_banco="BBVA",
         forma_pago="Transferencia", tipo_gasto="No Deducible",
         fecha_pago="20/09/2026", descripcion="Pago")
     hallazgos = validador.validar(s, [comun.concepto("PAGO PTU", 1000.0)])
@@ -177,7 +177,7 @@ def probar_validador_señala_lo_que_falta():
 
 
 def probar_clabe_de_18_digitos():
-    """una CLABE corta es un error; una de 18 pasa"""
+    """una CLABE corta es un error; una de 18 bien formada pasa"""
     lote = comun.lote()
     base = dict(
         lote_id=lote.id, empresa="Abastecedora", sucursal="Corporativo",
@@ -190,8 +190,33 @@ def probar_clabe_de_18_digitos():
     assert any("18 dígitos" in h.mensaje for h in corta if h.es_error)
 
     buena = validador.validar(
-        Solicitud(**base, cuenta_clabe="012345678901234567"), partidas)
+        Solicitud(**base, cuenta_clabe="012345678901234568"), partidas)
     assert not validador.hay_errores(buena)
+
+
+def probar_la_clabe_no_pasa_solo_por_medir_18():
+    """una CLABE de 18 dígitos con uno cambiado se rechaza, no se encola"""
+    # Es el error que ninguna otra regla puede ver: tiene el largo correcto, son
+    # todos dígitos y el prefijo es de un banco real. Si pasa de aquí, el
+    # siguiente en enterarse es quien no recibió su pago.
+    lote = comun.lote()
+    base = dict(
+        lote_id=lote.id, empresa="Abastecedora", sucursal="Corporativo",
+        tipo_beneficiario="Acreedor", beneficiario_nombre="ANA",
+        beneficiario_rfc="XAXX010101000", forma_pago="Transferencia",
+        tipo_gasto="No Deducible", fecha_pago="20/09/2026")
+    partidas = [comun.concepto("PAGO PTU", 100.0)]
+
+    # La misma CLABE buena de la prueba anterior con el último dígito cambiado.
+    hallazgos = validador.validar(
+        Solicitud(**base, cuenta_clabe="012345678901234567"), partidas)
+    errores = [h for h in hallazgos if h.es_error]
+    assert any(h.campo == "cuenta_clabe" and "verificador" in h.mensaje
+               for h in errores), validador.resumen(hallazgos)
+
+    # Y no se acumula con el de longitud: una CLABE mal da UN error, no dos que
+    # digan cosas distintas sobre el mismo campo.
+    assert sum(1 for h in errores if h.campo == "cuenta_clabe") == 1
 
 
 def probar_rfc_faltante_es_aviso_no_error():
@@ -201,7 +226,7 @@ def probar_rfc_faltante_es_aviso_no_error():
         lote_id=lote.id, empresa="Abastecedora", sucursal="Corporativo",
         tipo_beneficiario="Acreedor", beneficiario_nombre="ANA LOPEZ",
         beneficiario_correo="a@ejemplo.invalid",
-        cuenta_clabe="012345678901234567", cuenta_banco="BBVA",
+        cuenta_clabe="012345678901234568", cuenta_banco="BBVA",
         forma_pago="Transferencia", tipo_gasto="No Deducible",
         fecha_pago="20/09/2026")
     hallazgos = validador.validar(s, [comun.concepto("PAGO PTU", 100.0)])
@@ -215,7 +240,7 @@ def probar_rfc_mal_formado_si_es_error():
     s = Solicitud(
         lote_id=lote.id, empresa="Abastecedora", sucursal="Corporativo",
         tipo_beneficiario="Acreedor", beneficiario_nombre="ANA",
-        beneficiario_rfc="NO-ES-UN-RFC", cuenta_clabe="012345678901234567",
+        beneficiario_rfc="NO-ES-UN-RFC", cuenta_clabe="012345678901234568",
         forma_pago="Transferencia", tipo_gasto="No Deducible",
         fecha_pago="20/09/2026")
     hallazgos = validador.validar(s, [comun.concepto("PAGO PTU", 100.0)])
@@ -228,7 +253,7 @@ def probar_proveedor_necesita_insumos_no_conceptos():
     base = dict(
         lote_id=lote.id, empresa="Abastecedora", sucursal="Corporativo",
         tipo_beneficiario="Proveedor", beneficiario_nombre="PROVEEDOR SA",
-        beneficiario_rfc="XAXX010101000", cuenta_clabe="012345678901234567",
+        beneficiario_rfc="XAXX010101000", cuenta_clabe="012345678901234568",
         cuenta_banco="BBVA", forma_pago="Transferencia",
         tipo_gasto="No Deducible", fecha_pago="20/09/2026")
 
@@ -248,7 +273,7 @@ def probar_renglon_de_la_otra_clase_es_solo_aviso():
         lote_id=lote.id, empresa="Abastecedora", sucursal="Corporativo",
         tipo_beneficiario="Acreedor", beneficiario_nombre="ANA",
         beneficiario_rfc="XAXX010101000", beneficiario_correo="a@b.invalid",
-        cuenta_clabe="012345678901234567", cuenta_banco="BBVA",
+        cuenta_clabe="012345678901234568", cuenta_banco="BBVA",
         forma_pago="Transferencia", tipo_gasto="No Deducible",
         fecha_pago="20/09/2026")
     hallazgos = validador.validar(s, [comun.concepto("PAGO PTU", 400.0),

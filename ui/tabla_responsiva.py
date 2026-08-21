@@ -119,7 +119,8 @@ class TablaResponsiva:
     def __init__(self, page, columnas: list[ColumnaTabla], *,
                  con_encabezado: bool = True, spacing: int = _COL_SPACING,
                  alto_fila: int = _ALTO_FILA, alto_encabezado: int = _ALTO_ENCABEZADO,
-                 ancho_inicial: "float | None" = None):
+                 ancho_inicial: "float | None" = None,
+                 alto_cuerpo: "int | None" = None):
         self.page = page
         self.columnas = list(columnas)
         self.con_encabezado = con_encabezado
@@ -136,8 +137,23 @@ class TablaResponsiva:
         # Row exterior aporta el scroll HORIZONTAL cuando el contenido excede el ancho.
         self._encabezado_holder = ft.Container(visible=con_encabezado)
         self._cuerpo = ft.Column(spacing=0, tight=True)
-        hijos_marco = [self._encabezado_holder, self._cuerpo] if con_encabezado \
-            else [self._cuerpo]
+        # Con `alto_cuerpo`, el scroll VERTICAL se le da solo al cuerpo y el
+        # encabezado se queda fijo: con 47 filas, perder los títulos de columna
+        # al bajar es justo cuando más falta hacen. El canalón derecho va en los
+        # DOS para que las columnas sigan alineadas con el encabezado, porque la
+        # barra se dibuja sobre el borde del área que scrollea.
+        if alto_cuerpo:
+            self._encabezado_holder.padding = ft.Padding.only(
+                right=_GUTTER_SCROLL)
+            cuerpo_visible = ft.Container(
+                ft.Column([self._cuerpo], spacing=0, tight=True,
+                          scroll=ft.ScrollMode.AUTO),
+                height=alto_cuerpo,
+                padding=ft.Padding.only(right=_GUTTER_SCROLL))
+        else:
+            cuerpo_visible = self._cuerpo
+        hijos_marco = [self._encabezado_holder, cuerpo_visible] if con_encabezado \
+            else [cuerpo_visible]
         self._marco = ft.Container(
             ft.Column(hijos_marco, spacing=0, tight=True),
             bgcolor=ft.Colors.SURFACE_CONTAINER_LOWEST,
@@ -267,8 +283,12 @@ class TablaResponsiva:
             else:
                 # Encabezados en MAYÚSCULAS y en `on-surface-variant`, como el
                 # diseño: distingue el rótulo del dato sin recurrir a negritas.
+                # El rótulo se alinea COMO SU COLUMNA y no siempre al centro:
+                # con el encabezado centrado sobre datos a la izquierda, cada
+                # columna se lee como dos bloques desplazados y la fila deja de
+                # verse como un renglón.
                 cont, t = self._mk_celda(
-                    c.etiqueta.upper(), ancho, CENTRO, bold=True)
+                    c.etiqueta.upper(), ancho, c.alineacion, bold=True)
                 if t is not None:
                     t.color = ft.Colors.ON_SURFACE_VARIANT
                 self._enc_refs.append((cont, t))

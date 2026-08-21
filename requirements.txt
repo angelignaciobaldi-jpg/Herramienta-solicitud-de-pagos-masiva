@@ -3,10 +3,18 @@
 flet>=0.85           # interfaz de escritorio (Material)
 playwright>=1.60     # automatización del navegador (RPA del SIPP)
 openpyxl>=3.1        # lectura de plantillas de Excel y exportación de resultados
-PyMuPDF>=1.24        # rasterizado de PDF para OCR y compresión antes de subir a SIPP
+PyMuPDF>=1.24        # capa de texto y rasterizado de PDF (lectura de carátulas)
 pytesseract>=0.3.10  # OCR local (requiere el motor Tesseract instalado)
+Pillow>=10.0         # preprocesado de la imagen antes del OCR (core/adaptadores/ocr_caratula.py)
 
 # Requisitos externos (no son paquetes de Python):
 #   Navegador de Playwright (Chromium) -> se descarga solo en el primer uso del
 #   RPA, o a mano con:  python -m playwright install chromium
-#   Motor Tesseract -> se empaqueta en el instalador (ver .github/workflows).
+#
+#   Motor Tesseract -> HOY NO SE EMPAQUETA. Hay que instalarlo en el equipo
+#   (https://github.com/UB-Mannheim/tesseract/wiki, con el idioma español).
+#   Sin él la herramienta arranca igual y lee las carátulas en PDF que traen
+#   capa de texto, pero NO las fotos ni los escaneos, que son la mitad. La
+#   pantalla de alta desde carátulas lo avisa al abrirse.
+#   Empaquetarlo en el instalador es parte de la fase 7; `core/ocr.py` ya lo
+#   busca primero en {app}\Tesseract-OCR para cuando eso ocurra.

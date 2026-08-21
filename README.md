@@ -19,18 +19,29 @@ Acreedor).
 python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
-python -m playwright install chromium   # solo cuando llegue el motor RPA
+python -m playwright install chromium   # navegador del RPA
 python app.py
 ```
+
+Además hace falta **Tesseract OCR** instalado en el equipo (con el idioma
+español) para leer las carátulas que llegan como foto o escaneo. Sin él la app
+arranca igual y lee los PDF que traen capa de texto, pero no las imágenes; la
+pantalla de alta desde carátulas lo avisa al abrirse. Todavía no se empaqueta en
+el instalador: eso es parte de la fase 7.
 
 Verificación de que nada quedó roto:
 
 ```powershell
-python scripts/probar.py              # las pruebas de lógica (lo primero que corres)
+python scripts/probar.py              # las pruebas de lógica (lo exige el CI)
 python scripts/smoke_import.py        # imports (lo exige el CI)
 python scripts/smoke_render.py        # abre la app y pinta cada pantalla
 python scripts/prueba_rpa_fixtures.py # el mapa de selectores vs. las páginas reales
 ```
+
+Los dos primeros los corre también el CI al publicar un Release, así que un
+Release no se compila si alguno falla. Los otros dos siguen siendo manuales:
+`smoke_render.py` necesita sesión de escritorio y `prueba_rpa_fixtures.py`
+depende de las páginas del portal, que no se versionan.
 
 `probar.py` corre las suites de [scripts/pruebas/](scripts/pruebas/) —datos,
 ingesta, catálogo, asignación e interfaz— sin abrir ventana ni tocar SIPP, con
@@ -93,7 +104,10 @@ core/             Backend (no importa Flet)
   catalogos.py    Catálogos reales de SIPP (extraídos del DOM del portal)
   db.py           SQLite: lote · solicitud · partida · documento · bitácora
   validador.py    Reglas previas a encolar
+  ocr.py          Texto de un PDF o imagen (capa de texto, o Tesseract)
   rpa_sipp.py     (fase 2) SesionSipp + flujo de solicitud de pago
+  adaptadores/
+    ocr_caratula.py  CLABE, titular, banco y RFC de una carátula bancaria
 ui/               Una pantalla por archivo; cada una expone `.contenido`
   solicitudes.py  Tabla maestro-detalle del lote  ← pantalla principal
   documentos.py   (fase 3) ingesta de CFDI / Excel / anexos
@@ -122,11 +136,22 @@ de Solicitudes de Pago`. En desarrollo van a la raíz del proyecto.
 
 Lo que ya se puede hacer hoy:
 
-- Crear lotes y capturar solicitudes a mano con su desglose de conceptos e
-  insumos; revisarlas, duplicarlas, omitirlas y fijar el punto de parada.
+- Crear lotes y capturar solicitudes. **Nueva solicitud** pregunta primero de
+  dónde sale: captura manual, alta desde carátulas o carga masiva desde Excel.
+- En la tabla, cada fila trae sus propias acciones —editar, duplicar, deshacer y
+  eliminar— y el check del encabezado selecciona todo el lote. Con filas
+  marcadas aparece una barra contextual (omitir, eliminar, asignación masiva);
+  sin selección, la barra solo ofrece lo que aplica al lote entero.
 - **Alta desde carátulas**: cada archivo de una carpeta se vuelve una solicitud,
-  con el beneficiario tomado del nombre del archivo y la carátula ya adjunta;
-  después el Excel completa el resto emparejando por nombre.
+  con la carátula ya adjunta. De cada una se **lee la CLABE y el titular**: el
+  titular es el beneficiario y la CLABE es la llave con la que después se
+  empareja el Excel (con respaldo por nombre cuando falta de algún lado). Las
+  discrepancias de CLABE contra el Excel se marcan sin bloquear: manda la
+  carátula, que es la que acredita la cuenta.
+- **Toda CLABE se comprueba con su dígito verificador**, venga del OCR, de un
+  Excel o tecleada a mano. Una con 18 dígitos y uno cambiado ya no pasa a la
+  cola: es el único momento en que ese error se puede ver, porque después el
+  pago ya salió a otra cuenta.
 - **Carga masiva desde Excel**: descargar la plantilla, llenarla, y revisar la
   vista previa fila por fila antes de importar.
 - **Adjuntar carátulas y Vo.Bo.**, uno por uno en el formulario o una carpeta

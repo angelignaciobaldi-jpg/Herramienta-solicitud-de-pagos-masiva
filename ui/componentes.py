@@ -337,10 +337,16 @@ _TEXTO_TABLA = 12
 _ICONO_TABLA = 18
 
 
-def _caja_tabla(contenido: ft.Control, ancho: int | None) -> ft.Container:
-    """Caja de un campo de tabla. IDÉNTICA para texto y para select."""
+def _caja_tabla(contenido: ft.Control, ancho: int | None,
+                tooltip: str | None = None) -> ft.Container:
+    """Caja de un campo de tabla. IDÉNTICA para texto y para select.
+
+    El tooltip va en la CAJA y no en el campo: así aparece al pasar por toda la
+    celda, y no solo por el punto exacto donde está el cursor de texto.
+    """
     return ft.Container(
         content=contenido, width=ancho, height=ALTO_CAMPO_TABLA,
+        tooltip=tooltip,
         bgcolor=ft.Colors.SURFACE_CONTAINER_LOWEST,
         border=ft.Border.all(1, ft.Colors.OUTLINE_VARIANT),
         border_radius=_RADIO_TABLA,
@@ -349,7 +355,8 @@ def _caja_tabla(contenido: ft.Control, ancho: int | None) -> ft.Container:
 
 
 def campo_tabla_texto(*, valor: str = "", on_blur=None,
-                      ancho: int | None = None) -> ft.Container:
+                      ancho: int | None = None,
+                      tooltip: str | None = None) -> ft.Container:
     """Campo de texto de una celda. `on_blur` recibe el TextField en `e.control`."""
     campo = ft.TextField(
         value=valor, on_blur=on_blur,
@@ -363,7 +370,7 @@ def campo_tabla_texto(*, valor: str = "", on_blur=None,
         # el mismo punto) sin que el texto se pegue al borde superior.
         text_align=ft.TextAlign.LEFT,
         text_vertical_align=ft.VerticalAlignment.CENTER)
-    return _caja_tabla(campo, ancho)
+    return _caja_tabla(campo, ancho, tooltip)
 
 
 _ALTO_LISTA_MENU = 320

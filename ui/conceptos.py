@@ -21,7 +21,8 @@ from core import conceptos
 from core.empresas import NOMBRES_EMPRESAS
 from ui.comun import GRIS, NARANJA, ROJO, VERDE
 from ui.componentes import (boton_herramienta, boton_primario, boton_secundario,
-                            campo_opciones, campo_texto, tarjeta_seccion)
+                            buscador, campo_opciones, campo_texto, icono_accion,
+                            tarjeta_seccion)
 from ui.configuracion import ambiente_actual, url_login
 from ui.tabla_responsiva import IZQ, ColumnaTabla, FilaDatos, TablaResponsiva
 
@@ -39,6 +40,7 @@ class SeccionConceptos:
         self.app = app
         self.page = app.page
         self._conceptos: list[conceptos.Concepto] = []
+        self._filtro = ""
         self._construir()
 
     # ------------------------------------------------------------ UI
@@ -57,9 +59,23 @@ class SeccionConceptos:
                      self.btn_importar],
                     spacing=10, wrap=True, expand=True,
                     vertical_alignment=ft.CrossAxisAlignment.CENTER),
-             self.txt_estado,
              boton_primario("Agregar concepto", ft.Icons.ADD,
                             self._abrir_alta)],
+            spacing=12, vertical_alignment=ft.CrossAxisAlignment.CENTER)
+
+        # Filtra mientras se escribe: son decenas de conceptos de nombre largo y
+        # parecido, y tener que dar Enter para ver si existe uno es peor que
+        # recorrer la lista a ojo.
+        self.tf_buscar = buscador("Buscar concepto…", width=340)
+        self.tf_buscar.on_change = self._cambiar_filtro
+        self.btn_limpiar = icono_accion(
+            ft.Icons.CLOSE, "Limpiar búsqueda", self._limpiar_filtro,
+            color=GRIS)
+        self.btn_limpiar.visible = False
+        self.tf_buscar.suffix = self.btn_limpiar
+
+        fila_buscar = ft.Row(
+            [self.tf_buscar, ft.Container(expand=True), self.txt_estado],
             spacing=12, vertical_alignment=ft.CrossAxisAlignment.CENTER)
 
         self.tabla = TablaResponsiva(self.page, _COLUMNAS)
@@ -75,6 +91,24 @@ class SeccionConceptos:
                 horizontal_alignment=ft.CrossAxisAlignment.CENTER),
             alignment=ft.Alignment(0, 0), padding=40, visible=False)
 
+        # Vacío por la búsqueda ≠ vacío de verdad. Con un solo mensaje, filtrar
+        # «vigilancia» y no encontrarla invitaría a importar de SIPP un catálogo
+        # que ya está completo, o a dar de alta a mano un concepto que ya existe
+        # escrito de otra forma.
+        self.txt_sin_resultados = ft.Text("", color=GRIS,
+                                          text_align=ft.TextAlign.CENTER)
+        self.sin_resultados = ft.Container(
+            content=ft.Column(
+                [ft.Icon(ft.Icons.SEARCH_OFF, size=40, color=GRIS),
+                 ft.Text("Ningún concepto coincide con la búsqueda.",
+                         theme_style=ft.TextThemeStyle.BODY_LARGE),
+                 self.txt_sin_resultados,
+                 ft.TextButton("Quitar la búsqueda", icon=ft.Icons.CLOSE,
+                               on_click=self._limpiar_filtro)],
+                spacing=8, tight=True,
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER),
+            alignment=ft.Alignment(0, 0), padding=40, visible=False)
+
         self.contenido = ft.Column(
             [tarjeta_seccion(ft.Column([
                 ft.Text("Conceptos de pago",
@@ -86,9 +120,10 @@ class SeccionConceptos:
                         "Es una lista única para todo el grupo: se lee de una "
                         "empresa y sirve para todas.",
                         theme_style=ft.TextThemeStyle.BODY_MEDIUM, color=GRIS),
-                ft.Divider(), barra], spacing=12, tight=True)),
+                ft.Divider(), barra, fila_buscar], spacing=12, tight=True)),
              ft.Container(
-                 content=ft.Column([self.tabla.control, self.vacio],
+                 content=ft.Column([self.tabla.control, self.vacio,
+                                    self.sin_resultados],
                                    scroll=ft.ScrollMode.AUTO, expand=True,
                                    horizontal_alignment=ft.CrossAxisAlignment.STRETCH),
                  expand=True)],
@@ -139,11 +174,39 @@ class SeccionConceptos:
     def _on_resize(self, _e=None) -> None:
         """La tabla se remide sola; presente por el contrato de pantalla."""
 
+    # ---------------------------------------------------------- búsqueda
+    def _cambiar_filtro(self, _e=None) -> None:
+        self._filtro = self.tf_buscar.value or ""
+        self.cargar_desde_db()
+
+    def _limpiar_filtro(self, _e=None) -> None:
+        self.tf_buscar.value = ""
+        self._filtro = ""
+        self.cargar_desde_db()
+
+    def _coincide(self, concepto: conceptos.Concepto) -> bool:
+        """True si el concepto casa con lo escrito en el buscador.
+
+        Se compara con `conceptos.normalizar`, el mismo criterio con el que el
+        catálogo decide si dos conceptos son el mismo: así buscar «prevision»
+        encuentra «PREVISIÓN» y no depende de acentos ni de mayúsculas.
+
+        Las palabras se buscan sueltas y en cualquier orden, porque los nombres
+        de SIPP son largos y encadenados —«ISR RETENCIONES POR SALARIOS»— y
+        nadie recuerda el orden exacto: «salarios isr» tiene que encontrarlo.
+        """
+        palabras = conceptos.normalizar(self._filtro).split()
+        if not palabras:
+            return True
+        nombre = conceptos.normalizar(concepto.nombre)
+        return all(p in nombre for p in palabras)
+
     # ------------------------------------------------------------ datos
     def cargar_desde_db(self) -> None:
         self._conceptos = conceptos.listar()
+        visibles = [c for c in self._conceptos if self._coincide(c)]
         filas = []
-        for c in self._conceptos:
+        for c in visibles:
             if c.verificado:
                 # La empresa de la que se leyó va en el tooltip, no en una
                 # columna: el catálogo es una lista única para todo el grupo y
@@ -170,11 +233,27 @@ class SeccionConceptos:
                               on_click=lambda _e, cid=c.id: self._borrar(cid)),
             ]))
         self.tabla.set_contenido(filas)
-        hay = bool(filas)
-        self.tabla.control.visible = hay
-        self.vacio.visible = not hay
-        sin_verificar = sum(1 for c in self._conceptos if not c.verificado)
-        self.txt_estado.value = f"{len(filas)} concepto(s)"
+        total = len(self._conceptos)
+        buscando = bool(conceptos.normalizar(self._filtro))
+        self.tabla.control.visible = bool(filas)
+        # El catálogo vacío y la búsqueda sin resultados son estados distintos y
+        # nunca coinciden: si no hay nada que buscar, no puede sobrar el filtro.
+        self.vacio.visible = not filas and not buscando
+        self.sin_resultados.visible = not filas and buscando
+        self.txt_sin_resultados.value = (
+            f"Ninguno de los {total} conceptos del catálogo contiene "
+            f"«{self._filtro.strip()}».")
+        self.btn_limpiar.visible = buscando
+
+        # El contador cuenta lo que se está VIENDO; el total va al lado para que
+        # no parezca que se perdieron conceptos al filtrar.
+        if buscando:
+            self.txt_estado.value = f"{len(filas)} de {total} concepto(s)"
+        else:
+            self.txt_estado.value = f"{total} concepto(s)"
+        # Lo sin verificar se cuenta sobre lo visible: es un aviso de lo que hay
+        # enfrente, no del catálogo entero.
+        sin_verificar = sum(1 for c in visibles if not c.verificado)
         if sin_verificar:
             self.txt_estado.value += f" · {sin_verificar} sin verificar"
         self.txt_estado.color = NARANJA if sin_verificar else GRIS
@@ -215,7 +294,9 @@ class SeccionConceptos:
 
         resumen = await asyncio.to_thread(
             conceptos.importar, resultado["conceptos"], empresa)
-        self.cargar_desde_db()
+        # Sin esto, importar con una búsqueda puesta parecería no haber traído
+        # nada: lo nuevo entraría al catálogo pero fuera del filtro.
+        self._limpiar_filtro()
         self.app.avisar(
             f"{resumen['nuevos']} concepto(s) nuevos de {empresa}"
             + (f", {resumen['ya_estaban']} ya estaban."
@@ -245,7 +326,9 @@ class SeccionConceptos:
             self.page.update()
             return
         self._cerrar_alta()
-        self.cargar_desde_db()
+        # Igual que al importar: el concepto recién dado de alta tiene que
+        # quedar a la vista, no escondido detrás del filtro anterior.
+        self._limpiar_filtro()
         self.app.avisar(
             f"«{creado.nombre}» agregado. Recuerda confirmar con soporte que "
             f"exista en SIPP antes de usarlo en un lote.", NARANJA,

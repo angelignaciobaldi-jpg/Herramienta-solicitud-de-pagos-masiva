@@ -1,4 +1,4 @@
-"""Carga masiva de solicitudes desde un archivo de Excel.
+"""Carga masiva de solicitudes desde un archivo de Excel o CSV.
 
 El flujo de la pantalla es deliberadamente en tres pasos —descargar la plantilla,
 elegir el archivo, revisar la vista previa— y **nada se guarda hasta el último**.
@@ -62,8 +62,8 @@ class CargaMasiva:
                    spacing=8, tight=True),
             ft.Text("Trae una hoja por llenar, los catálogos de SIPP como "
                     "listas desplegables y las instrucciones. Si ya tienes un "
-                    "archivo propio, también sirve: se reconocen los "
-                    "encabezados más comunes.",
+                    "archivo propio, también sirve —Excel o CSV—: se reconocen "
+                    "los encabezados más comunes.",
                     theme_style=ft.TextThemeStyle.BODY_MEDIUM, color=GRIS),
             ft.Row([boton_secundario("Descargar plantilla de Excel",
                                      ft.Icons.TABLE_VIEW,
@@ -91,7 +91,8 @@ class CargaMasiva:
 
         # Paso 3 — vista previa.
         self.txt_resumen = ft.Text("", theme_style=ft.TextThemeStyle.BODY_LARGE)
-        self.tabla = TablaResponsiva(self.page, _COLUMNAS, ancho_inicial=880)
+        self.tabla = TablaResponsiva(self.page, _COLUMNAS, ancho_inicial=880,
+                                     alto_cuerpo=280)
         self.chk_solo_malas = ft.Checkbox(
             label="Ver solo las filas con problemas", value=False,
             on_change=lambda _e: self._pintar_previa())
@@ -105,7 +106,7 @@ class CargaMasiva:
                      self.chk_solo_malas],
                     spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
              self.txt_resumen,
-             ft.Container(self.tabla.control, height=280)],
+             self.tabla.control],
             spacing=10, tight=True, visible=False,
             horizontal_alignment=ft.CrossAxisAlignment.STRETCH)
 
@@ -156,8 +157,8 @@ class CargaMasiva:
     # --------------------------------------------------------- archivo
     async def _elegir_archivo(self, _e=None) -> None:
         archivos = await self.app.picker.pick_files(
-            dialog_title="Elige el Excel con las solicitudes",
-            allowed_extensions=["xlsx", "xlsm"], allow_multiple=False)
+            dialog_title="Elige el archivo con las solicitudes",
+            allowed_extensions=["xlsx", "xlsm", "csv"], allow_multiple=False)
         if not archivos:
             return
         self._ruta = archivos[0].path

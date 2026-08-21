@@ -1,5 +1,10 @@
 """ExcelAdapter: convierte una hoja de cálculo en solicitudes y partidas.
 
+Acepta .xlsx/.xlsm y también .csv. El CSV se envuelve en un libro de openpyxl
+(ver `_libro_desde_csv`) para que los dos formatos pasen por exactamente las
+mismas reglas de detección y validación, en vez de tener un camino paralelo
+con menos comprobaciones.
+
 El formato lo define `core/plantilla_excel.py`, pero el lector es **tolerante a
 propósito**: reconoce los encabezados por sinónimos (las plantillas que ya
 circulan en el área no usan los mismos nombres) y permite corregir a mano el
@@ -12,6 +17,9 @@ serían peor que capturarlas a mano.
 
 from __future__ import annotations
 
+import csv
+import io
+import os
 import re
 from dataclasses import dataclass, field
 from datetime import date, datetime
@@ -147,7 +155,78 @@ def _clabe(valor) -> str:
 # --------------------------------------------------------------------------- #
 #  Lectura
 # --------------------------------------------------------------------------- #
+def _texto_csv(ruta: str) -> str:
+    """Lee el CSV probando codificaciones, de la más estricta a la más laxa.
+
+    Los CSV que exporta Excel en español suelen venir en la codificación de
+    Windows (cp1252), no en UTF-8, y ahí un nombre con acento se leería roto.
+    `latin-1` cierra la lista porque acepta cualquier byte: es preferible un
+    acento raro a no poder abrir el archivo.
+    """
+    for codec in ("utf-8-sig", "cp1252", "latin-1"):
+        try:
+            with open(ruta, encoding=codec, newline="") as fh:
+                return fh.read()
+        except UnicodeDecodeError:
+            continue
+    with open(ruta, encoding="utf-8", errors="replace", newline="") as fh:
+        return fh.read()
+
+
+def _delimitador(texto: str) -> str:
+    """El separador del CSV, deducido del renglón de encabezados.
+
+    Excel guarda con ';' cuando el Windows está en español (la coma es el
+    separador decimal), y con ',' cuando está en inglés. Se cuenta sobre los
+    encabezados y no sobre una fila de datos porque esa puede traer comas
+    dentro de un importe entrecomillado —« $7,966.13 »— y desempatar mal.
+    """
+    cabecera = next((l for l in texto.splitlines() if l.strip()), "")
+    conteos = {d: cabecera.count(d) for d in (",", ";", "\t", "|")}
+    mejor = max(conteos, key=lambda d: conteos[d])
+    return mejor if conteos[mejor] else ","
+
+
+def _libro_desde_csv(ruta: str):
+    """Envuelve un CSV en un libro de openpyxl para no duplicar el lector.
+
+    Todo lo que sigue (detección de encabezados, mapeo manual de columnas,
+    validación) trabaja sobre la interfaz de openpyxl. Convertir aquí, en vez
+    de escribir un camino paralelo para CSV, hace que un CSV pase exactamente
+    por las mismas reglas que un .xlsx y no haya un formato con menos
+    validaciones que el otro.
+
+    Todas las celdas quedan como TEXTO, que es lo que un CSV es. No estorba:
+    `_numero`, `_fecha` y `_clabe` ya interpretan texto porque las plantillas
+    que circulan traen los importes como '$1,234.56'. De hecho ayuda con la
+    CLABE, que en .xlsx se corrompe cuando la celda quedó en formato numérico.
+    """
+    from openpyxl import Workbook
+
+    texto = _texto_csv(ruta)
+    libro = Workbook()
+    hoja = libro.active
+    hoja.title = HOJA_SOLICITUDES
+    lector = csv.reader(io.StringIO(texto), delimiter=_delimitador(texto))
+    for indice, fila in enumerate(lector, start=1):
+        for columna, valor in enumerate(fila, start=1):
+            # Celda por celda y no `append`: este último interpreta como
+            # fórmula cualquier valor que empiece con '=', y una descripción
+            # bien puede hacerlo.
+            hoja.cell(row=indice, column=columna).value = valor
+    return libro
+
+
+def _letra_columna(indice: int) -> str:
+    from openpyxl.utils import get_column_letter
+
+    return get_column_letter(indice)
+
+
 def _abrir(ruta: str):
+    if os.path.splitext(ruta)[1].lower() == ".csv":
+        return _libro_desde_csv(ruta)
+
     from openpyxl import load_workbook
 
     # `data_only=True`: si la celda trae una fórmula, interesa su RESULTADO.
@@ -357,6 +436,166 @@ def leer(ruta: str, lote_id: str = "", *,
         return Importacion(deteccion=deteccion,
                            error="El archivo no tiene filas con datos.")
     return Importacion(filas, deteccion)
+
+
+# --------------------------------------------------------------------------- #
+#  Documentos enlazados
+# --------------------------------------------------------------------------- #
+# Una URL escrita como texto en la celda. Se acepta además del hipervínculo real
+# porque al pegar un listado en la hoja el enlace suele llegar como texto plano.
+_RE_URL = re.compile(r"https?://\S+", re.I)
+
+
+# Palabras del encabezado que delatan la columna de la carátula bancaria. Un
+# formulario puede pedir varios documentos por solicitud —boleta, acta, censo,
+# carátula—, y bajarlos todos sería traer tres archivos inútiles por persona.
+_PISTAS_CARATULA = ("caratula", "estado de cuenta", "cuenta bancaria",
+                    "datos bancarios", "clabe")
+# Hasta qué fila se busca el renglón de encabezados. No siempre es la primera:
+# los export de formularios suelen traer dos o tres filas de títulos agrupados.
+_FILAS_ENCABEZADO = 12
+
+
+def _url_de_celda(celda) -> str:
+    """La URL de una celda, sea hipervínculo real o texto pegado.
+
+    Se miran las dos formas porque llegan las dos: «Insertar > Vínculo» produce
+    un hipervínculo, y pegar un listado deja la dirección como texto. En un
+    archivo real de 212 filas, una era hipervínculo y el resto texto.
+    """
+    destino = getattr(getattr(celda, "hyperlink", None), "target", None)
+    if not destino:
+        hallazgo = _RE_URL.search(_texto(celda.value))
+        destino = hallazgo.group(0) if hallazgo else None
+    destino = (destino or "").strip()
+    return destino if destino.lower().startswith(("http://", "https://")) else ""
+
+
+def columnas_con_enlaces(ruta: str,
+                         hoja_nombre: str = HOJA_SOLICITUDES) -> list[dict]:
+    """Columnas que contienen documentos enlazados, con su encabezado y cuántos.
+
+    Devuelve una lista de dicts `{indice, letra, encabezado, cantidad}`, para
+    que la interfaz pueda decir de cuál columna va a bajar y dejar cambiarla.
+    """
+    libro = _abrir(ruta)
+    try:
+        hoja = _hoja(libro, hoja_nombre)
+        conteo: dict[int, int] = {}
+        for fila in hoja.iter_rows():
+            for celda in fila:
+                if _url_de_celda(celda):
+                    conteo[celda.column] = conteo.get(celda.column, 0) + 1
+
+        salida = []
+        for columna, cantidad in sorted(conteo.items()):
+            # El encabezado es el último texto que NO es un enlace por encima de
+            # los datos: así se acierta aunque el renglón de títulos no sea el
+            # primero, que es lo normal en un export de formulario.
+            encabezado = ""
+            for numero in range(1, _FILAS_ENCABEZADO + 1):
+                celda = hoja.cell(row=numero, column=columna)
+                texto = _texto(celda.value)
+                if texto and not _url_de_celda(celda):
+                    encabezado = texto
+            salida.append({
+                "indice": columna,
+                # Con `get_column_letter` y no con `celda.column_letter`: la
+                # fila de títulos suele traer celdas COMBINADAS, y una
+                # `MergedCell` no expone esa propiedad.
+                "letra": _letra_columna(columna),
+                "encabezado": encabezado,
+                "cantidad": cantidad,
+            })
+        return salida
+    finally:
+        try:
+            libro.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def columna_de_caratulas(columnas: list[dict]) -> "int | None":
+    """De las columnas con enlaces, la que el encabezado señala como carátula.
+
+    Devuelve None si ninguna lo dice: ahí no se adivina, porque bajar la columna
+    equivocada trae el documento de otra cosa y el OCR no encuentra CLABE en un
+    acta de nacimiento.
+    """
+    for columna in columnas:
+        normalizado = _normalizar(columna.get("encabezado", ""))
+        if any(pista in normalizado for pista in _PISTAS_CARATULA):
+            return columna["indice"]
+    return None
+
+
+def enlaces_por_fila(ruta: str, hoja_nombre: str = HOJA_SOLICITUDES, *,
+                     columna: "int | None" = None) -> dict[int, str]:
+    """Documentos enlazados en la hoja: {número de fila -> URL}.
+
+    Con `columna` se toma el enlace de esa columna y solo de esa. Sin ella se
+    intenta reconocer la de la carátula por su encabezado y, si no se reconoce,
+    se cae al primer enlace de cada fila —que es lo correcto cuando la hoja trae
+    un único documento por renglón—.
+
+    Un CSV nunca trae hipervínculos (el formato no los soporta), así que ahí
+    solo se encuentran las URL escritas como texto.
+    """
+    if columna is None:
+        columna = columna_de_caratulas(columnas_con_enlaces(ruta, hoja_nombre))
+
+    libro = _abrir(ruta)
+    try:
+        hoja = _hoja(libro, hoja_nombre)
+        encontrados: dict[int, str] = {}
+        for fila in hoja.iter_rows():
+            for celda in fila:
+                if columna is not None and celda.column != columna:
+                    continue
+                if celda.row in encontrados:
+                    break
+                url = _url_de_celda(celda)
+                if url:
+                    encontrados[celda.row] = url
+                    break
+        return encontrados
+    finally:
+        try:
+            libro.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def nombres_por_fila(ruta: str,
+                     hoja_nombre: str = HOJA_SOLICITUDES) -> dict[int, str]:
+    """{fila -> nombre del beneficiario}, para nombrar lo que se descargue.
+
+    Del nombre del archivo sale el beneficiario de respaldo cuando el OCR no
+    puede leer la carátula (`caratulas.nombre_desde_archivo`). Si lo bajado se
+    llamara «documento.pdf», ese respaldo se perdería.
+    """
+    try:
+        deteccion = detectar(ruta, hoja_nombre=hoja_nombre)
+    except Exception:  # noqa: BLE001 — sin nombres se sigue igual
+        return {}
+    columna = deteccion.columnas.get("beneficiario_nombre")
+    if columna is None:
+        return {}
+    libro = _abrir(ruta)
+    try:
+        hoja = _hoja(libro, deteccion.hoja)
+        nombres = {}
+        for fila in hoja.iter_rows(min_row=2, values_only=False):
+            if columna < len(fila):
+                valor = _texto(fila[columna].value)
+                if valor:
+                    nombres[fila[columna].row] = valor
+        return nombres
+    finally:
+        try:
+            libro.close()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def detectar_duplicados(filas: list[FilaImportada]) -> set[int]:

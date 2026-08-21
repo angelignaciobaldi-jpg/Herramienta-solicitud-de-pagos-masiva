@@ -31,6 +31,44 @@ def _lote_con_cfdi():
     return lote, ana, bruno, carla, prov, capturada
 
 
+def probar_se_reasignan_empresa_sucursal_y_fecha_sin_tocar_el_desglose():
+    """se puede corregir la cabecera de todo un lote sin asignar concepto"""
+    # El caso real: cuarenta y siete solicitudes salidas de carátulas, todas sin
+    # fecha de pago. Obligar a elegir un concepto para poder ponerles la fecha
+    # metería un renglón que nadie pidió.
+    lote, ana, *_ = _lote_con_cfdi()
+    antes = len(db.listar_partidas(ana.id))
+
+    plan = asignacion.calcular(lote.id, empresa="Abastecedora",
+                               sucursal="Corporativo", fecha_pago="30/09/2026")
+    assert not plan.error, plan.error
+    assert plan.cambios
+    asignacion.aplicar(lote.id, plan)
+
+    recargada = next(s for s in db.listar_solicitudes(lote.id) if s.id == ana.id)
+    assert recargada.empresa == "Abastecedora"
+    assert recargada.sucursal == "Corporativo"
+    assert recargada.fecha_pago == "30/09/2026"
+    assert len(db.listar_partidas(ana.id)) == antes, "no debió tocar el desglose"
+
+
+def probar_la_cabecera_sobrescribe_lo_que_ya_habia():
+    """reasignar es sustituir: si no, habría que vaciar campo por campo"""
+    lote = comun.lote()
+    s = comun.solicitud(lote.id, "ANA LOPEZ", fecha_pago="01/01/2026")
+    plan = asignacion.calcular(lote.id, fecha_pago="30/09/2026")
+    asignacion.aplicar(lote.id, plan)
+    recargada = next(x for x in db.listar_solicitudes(lote.id) if x.id == s.id)
+    assert recargada.fecha_pago == "30/09/2026", recargada.fecha_pago
+
+
+def probar_sin_concepto_ni_cabecera_no_hay_nada_que_asignar():
+    """el plan vacío se explica en vez de aplicarse"""
+    lote, *_ = _lote_con_cfdi()
+    plan = asignacion.calcular(lote.id)
+    assert plan.error and not plan.cambios
+
+
 def probar_calcular_no_toca_la_base():
     """la vista previa se calcula sin escribir nada"""
     lote, ana, *_ = _lote_con_cfdi()
@@ -102,7 +140,11 @@ def probar_alcance_seleccionadas():
 
 
 def probar_importe_fijo_y_en_blanco():
-    """un importe fijo se aplica igual; en blanco no pasa la validación"""
+    """un importe fijo se aplica; en blanco se asigna y queda pendiente"""
+    # Dejar el importe en blanco es DELIBERADO: cada solicitud lleva un monto
+    # distinto y no hay uno que sirva para el lote. Se asigna el concepto —lo
+    # único que este paso puede dar— y el monto se captura después. La solicitud
+    # queda incompleta, y de negarse a capturarla así se encarga el motor.
     lote, ana, *_ = _lote_con_cfdi()
     fijo = asignacion.calcular(
         lote.id, alcance=asignacion.SELECCIONADAS, seleccionadas={ana.id},
@@ -115,7 +157,9 @@ def probar_importe_fijo_y_en_blanco():
         nombre="VIGILANCIA", criterio_importe=asignacion.EN_BLANCO)
     cambio = blanco.cambios[0]
     assert cambio.partidas_despues[-1].importe == 0.0
-    assert not cambio.valido, "un renglón en cero no debe pasar"
+    assert cambio.valido, "en blanco se asigna igual"
+    assert not cambio.completo, "pero la solicitud NO queda lista"
+    assert cambio.pendientes or cambio.hallazgos, "y tiene que decirse"
 
 
 def probar_distribuir_no_pierde_centavos():
@@ -155,8 +199,123 @@ def probar_aplicar_y_deshacer():
     assert not asignacion.deshacer(lote.id)
 
 
+def probar_un_campo_ajeno_no_impide_asignar():
+    """faltar la CLABE no bloquea el concepto, pero se informa"""
+    # El modal no permite corregir la CLABE, así que negarse a asignar por ella
+    # dejaría al usuario sin salida sin evitar ningún riesgo: quien impide que
+    # llegue a SIPP es el motor.
+    lote = comun.lote()
+    s = comun.solicitud(lote.id, "ANDREA BARROS GARCIA", cuenta_clabe="",
+                        partidas=[comun.insumo("Facturado", 1500.0,
+                                               origen="CFDI")])
+    plan = asignacion.calcular(lote.id, nombre="PAGO TARJETA CREDITO",
+                               criterio_importe=asignacion.TOTAL_SOLICITUD)
+    cambio = plan.cambios[0]
+    assert cambio.valido, "el desglose queda bien; debe poder aplicarse"
+    assert not cambio.completo, "pero la solicitud no queda lista"
+    assert any("CLABE" in h.mensaje for h in cambio.pendientes)
+    assert not cambio.bloqueantes
+    assert plan.incompletos == [cambio] and not plan.completos
+
+    asignacion.aplicar(lote.id, plan)
+    partidas = db.listar_partidas(s.id)
+    assert [p.concepto_nombre for p in partidas if p.clase == CONCEPTO] == [
+        "PAGO TARJETA CREDITO"]
+    assert db.obtener_solicitud(s.id).importe_total == 1500.0
+
+
+def probar_un_desglose_malo_si_bloquea():
+    """lo que esta operación sí escribe la sigue bloqueando"""
+    # El importe en cero solo se perdona cuando se pidió dejarlo en blanco. Si
+    # se eligió un criterio que debía darle un monto y aun así quedó en cero,
+    # eso es un renglón mal escrito y sigue bloqueando: la excepción es para el
+    # flujo deliberado, no una puerta abierta para cualquier cero.
+    lote = comun.lote()
+    comun.solicitud(lote.id, "ANA LOPEZ", partidas=[
+        comun.insumo("Facturado", 1000.0, origen="CFDI")])
+    plan = asignacion.calcular(lote.id, nombre="VIGILANCIA",
+                               criterio_importe=asignacion.IMPORTE_FIJO,
+                               importe_fijo=0.0)
+    cambio = plan.cambios[0]
+    assert not cambio.valido
+    assert cambio.bloqueantes and all(h.campo == "partidas"
+                                      for h in cambio.bloqueantes)
+    assert asignacion.aplicar(lote.id, plan)["aplicadas"] == 0
+
+
+def probar_asignar_concepto_a_acreedores_sin_monto_no_se_bloquea():
+    """el caso real: 200 acreedores en cero reciben su concepto igual"""
+    # Era lo que impedía usar la función: todas salían «no se pueden asignar»
+    # porque el renglón nacía en cero, y no hay forma de ponerle a cada una su
+    # monto desde aquí. Se asigna el concepto y el importe se captura después.
+    lote = comun.lote()
+    for nombre in ("ANA LOPEZ", "BRUNO DIAZ", "CARLA RUIZ"):
+        comun.solicitud(lote.id, nombre, tipo="Acreedor", partidas=[])
+
+    plan = asignacion.calcular(lote.id, nombre="PAGO UTILIDADES",
+                               criterio_importe=asignacion.EN_BLANCO)
+    assert plan.cambios, plan.error
+    assert len(plan.validos) == len(plan.cambios), "ninguna debe quedar bloqueada"
+    # Se asignan, pero NINGUNA queda lista: les falta el importe y hay que
+    # decirlo, o el lote se lanzaría creyendo que está completo.
+    assert not plan.completos
+    assert len(plan.incompletos) == len(plan.cambios)
+
+    assert asignacion.aplicar(lote.id, plan)["aplicadas"] == 3
+    for s in db.listar_solicitudes(lote.id):
+        conceptos = [p for p in db.listar_partidas(s.id) if p.clase == CONCEPTO]
+        assert [p.concepto_nombre for p in conceptos] == ["PAGO UTILIDADES"]
+
+
 def probar_sin_nombre_no_hay_plan():
     """sin concepto que asignar no se calcula nada"""
     lote, *_ = _lote_con_cfdi()
     plan = asignacion.calcular(lote.id, nombre="   ")
     assert plan.error and not plan.cambios
+
+
+# --------------------------------------------------------------------------- #
+#  La puerta del motor
+# --------------------------------------------------------------------------- #
+# La contraparte de lo anterior: si la asignación masiva deja pasar una solicitud
+# incompleta, alguien tiene que negarse a capturarla. Ese alguien es el motor, y
+# es el único punto por el que se pasa a fuerza antes de tocar SIPP. Estas dos
+# pruebas van aquí, junto a las que relajan el bloqueo, para que nadie quite una
+# sin ver la otra.
+def probar_el_motor_no_intenta_lo_incompleto():
+    """una solicitud sin CLABE queda en REVISAR y no se abre el navegador"""
+    # Si `procesar_lote` llegara a abrir Playwright, esta prueba fallaría por
+    # falta de navegador o se colgaría: que devuelva sin tocarlo es la prueba.
+    from core import rpa_sipp
+
+    lote = comun.lote()
+    s = comun.solicitud(lote.id, "ANDREA BARROS GARCIA", cuenta_clabe="",
+                        partidas=[comun.concepto("VIGILANCIA", 1500.0)])
+    resumen = rpa_sipp.procesar_lote(
+        lote.id, "usuario", "clave", url_login="http://no.se.usa.invalid")
+
+    assert resumen == {"ok": 0, "revisar": 1, "error": 0, "cancelado": False,
+                       "detalle": ["ANDREA BARROS GARCIA: datos incompletos, "
+                                   "no se intentó."]}
+    guardada = db.obtener_solicitud(s.id)
+    assert guardada.estado == "REVISAR"
+    assert "CLABE" in guardada.error_msg
+    assert guardada.intentos == 0, "no se intentó, no se cuenta un intento"
+    # El motivo queda en la bitácora, no solo en la pantalla.
+    assert any("CLABE" in b.mensaje for b in db.listar_bitacora(s.id))
+
+
+def probar_el_motor_no_cuenta_como_lista_la_que_salto():
+    """lo incompleto no se confunde con lo capturado"""
+    lote = comun.lote()
+    comun.solicitud(lote.id, "SIN CLABE", cuenta_clabe="",
+                    partidas=[comun.concepto("VIGILANCIA", 100.0)])
+    comun.solicitud(lote.id, "SIN DESGLOSE", partidas=[])
+    comun.solicitud(lote.id, "YA CAPTURADA", estado="GUARDADA",
+                    partidas=[comun.concepto("VIGILANCIA", 100.0)])
+
+    from core import rpa_sipp
+
+    resumen = rpa_sipp.procesar_lote(
+        lote.id, "usuario", "clave", url_login="http://no.se.usa.invalid")
+    assert resumen["revisar"] == 2 and resumen["ok"] == 0

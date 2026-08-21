@@ -13,6 +13,14 @@ Por eso está partida en dos pasos que no se pueden saltar:
 
 Y por eso todo lo que sale de aquí pasa por `core.validador`: el objetivo de la
 asignación masiva es ahorrar capturas, no saltarse las reglas.
+
+Ahora bien, «pasa por el validador» no es lo mismo que «se niega a aplicar». Lo
+único que esta operación escribe es el desglose, así que solo la bloquean los
+errores del desglose. Lo que ya venía mal por otro lado —una CLABE faltante, un
+RFC mal escrito— se informa pero no impide asignar: negarse dejaría al usuario
+sin salida, porque este modal tampoco permite corregir esos campos. La red que
+impide que una solicitud incompleta llegue a SIPP está donde corresponde, en
+`rpa_sipp.procesar_lote`, que la valida antes de capturarla.
 """
 
 from __future__ import annotations
@@ -38,6 +46,12 @@ EN_BLANCO = "BLANCO"             # se deja en cero y se llena a mano
 IMPORTE_FIJO = "FIJO"            # el mismo importe para todas
 
 
+# El único campo que esta operación escribe es el desglose. El validador marca
+# sus hallazgos con `campo`, así que ese es el corte entre lo que la asignación
+# provoca y lo que ya venía mal de antes.
+_CAMPO_DESGLOSE = "partidas"
+
+
 @dataclass
 class Cambio:
     """Lo que le pasaría a UNA solicitud. Nada de esto se ha guardado aún."""
@@ -47,6 +61,12 @@ class Cambio:
     partidas_despues: list[Partida] = field(default_factory=list)
     hallazgos: list = field(default_factory=list)
     aviso: str = ""
+    # False cuando solo se reasignó cabecera (empresa, sucursal, fecha) y el
+    # desglose se quedó como estaba. Cambia qué cuenta como bloqueante.
+    toca_desglose: bool = True
+    # True cuando el importe se dejó en blanco A PROPÓSITO, para capturarlo
+    # después uno por uno. Ver `bloqueantes`.
+    importe_pospuesto: bool = False
 
     @property
     def total_antes(self) -> float:
@@ -59,7 +79,53 @@ class Cambio:
                                  self.partidas_despues)
 
     @property
+    def bloqueantes(self) -> list:
+        """Errores del desglose: los que esta asignación dejaría escritos.
+
+        Si no se tocó el desglose —solo se reasignó empresa, sucursal o
+        fecha—, sus errores NO bloquean: ya estaban ahí antes y esta operación
+        no los empeora. Bloquear por ellos impediría ponerle la fecha a un lote
+        entero justo por estar a medio llenar, que es cuando más falta hace.
+        """
+        if not self.toca_desglose:
+            return []
+        errores = [h for h in self.hallazgos
+                   if h.es_error and h.campo == _CAMPO_DESGLOSE]
+        if self.importe_pospuesto:
+            # Asignar el concepto y capturar los importes después es un flujo
+            # legítimo: cada solicitud lleva un monto distinto y no hay forma de
+            # ponerlos todos aquí. Que el renglón nazca en cero se informa como
+            # pendiente —la solicitud sigue incompleta— pero no impide dejarle
+            # ya escrito el concepto, que es lo único que este paso puede dar.
+            errores = [h for h in errores
+                       if h.codigo != validador.IMPORTE_EN_CERO]
+        return errores
+
+    @property
+    def pendientes(self) -> list:
+        """Errores ajenos al desglose, que ya traía la solicitud.
+
+        La CLABE, el RFC o la fecha no se tocan aquí, así que negarse a asignar
+        el concepto por culpa de ellos no arregla nada: deja al usuario sin
+        salida, porque este modal tampoco permite corregirlos. Se informan y la
+        solicitud se aplica; sigue marcada como incompleta en la tabla del lote
+        y **el motor se niega a capturarla** hasta que se corrija.
+        """
+        return [h for h in self.hallazgos
+                if h.es_error and h.campo != _CAMPO_DESGLOSE]
+
+    @property
     def valido(self) -> bool:
+        """True si se puede aplicar; no si la solicitud queda lista.
+
+        Son cosas distintas: una solicitud puede recibir bien su concepto y
+        seguir sin CLABE. Para «lista para capturar» está `completo`.
+        """
+        return not self.bloqueantes
+
+    @property
+    def completo(self) -> bool:
+        """True si tras aplicar no le quedaría ningún error."""
         return not validador.hay_errores(self.hallazgos)
 
 
@@ -73,7 +139,18 @@ class Plan:
 
     @property
     def validos(self) -> list[Cambio]:
+        """Los que se pueden aplicar (el desglose queda bien)."""
         return [c for c in self.cambios if c.valido]
+
+    @property
+    def completos(self) -> list[Cambio]:
+        """Los que además quedarían listos para capturar."""
+        return [c for c in self.cambios if c.completo]
+
+    @property
+    def incompletos(self) -> list[Cambio]:
+        """Se aplican, pero siguen con algo que corregir fuera del desglose."""
+        return [c for c in self.cambios if c.valido and not c.completo]
 
     @property
     def con_aviso(self) -> list[Cambio]:
@@ -106,7 +183,9 @@ def calcular(lote_id: str, *, alcance: str = TODAS,
              nombre: str = "", centro_costos: str = "",
              cuenta_contable: str = "", tipo_compra: str = "",
              criterio_importe: str = TOTAL_SOLICITUD,
-             importe_fijo: float = 0.0) -> Plan:
+             importe_fijo: float = 0.0,
+             empresa: str = "", sucursal: str = "",
+             fecha_pago: str = "") -> Plan:
     """Calcula el antes/después sin escribir nada.
 
     La **clase del renglón no se elige**: la impone el tipo de beneficiario de
@@ -114,10 +193,23 @@ def calcular(lote_id: str, *, alcance: str = TODAS,
     corresponden insumos; a un Deudor o Acreedor, conceptos). Por eso una misma
     asignación puede producir renglones de clases distintas en el mismo lote, y
     está bien.
+
+    `empresa`, `sucursal` y `fecha_pago` son datos de la CABECERA de la
+    solicitud, no del desglose. A diferencia del resto, aquí sí **sobrescriben**
+    lo que hubiera: la asignación masiva se usa para corregir un lote entero
+    —«todas van a la misma empresa», «se pagan el día 30»—, y respetar lo
+    anterior obligaría a vaciarlo antes, campo por campo.
+
+    Cualquiera de los tres puede ir solo: se puede reasignar la fecha de todo un
+    lote sin tocar el concepto, y por eso `nombre` dejó de ser obligatorio.
     """
     seleccionadas = seleccionadas or set()
-    if not nombre.strip():
-        return Plan(error="Falta el concepto o insumo que se va a asignar.")
+    cabecera = {k: v.strip() for k, v in (("empresa", empresa),
+                                          ("sucursal", sucursal),
+                                          ("fecha_pago", fecha_pago)) if v.strip()}
+    if not nombre.strip() and not cabecera:
+        return Plan(error="Indica qué asignar: un concepto o insumo, o alguno "
+                          "de los datos de la solicitud.")
 
     # Para el alcance «sin partidas» hace falta saber de qué clase hablamos, y
     # eso depende de cada solicitud; se resuelve por solicitud más abajo.
@@ -140,21 +232,32 @@ def calcular(lote_id: str, *, alcance: str = TODAS,
         conservadas = [] if modo == REEMPLAZAR else [
             Partida(**{**p.__dict__}) for p in antes]
 
-        nueva = Partida(clase=clase, solicitud_id=s.id, origen="MASIVA")
-        if clase == CONCEPTO:
-            nueva.concepto_nombre = nombre.strip()
-        else:
-            nueva.insumo_nombre = nombre.strip()
-            nueva.centro_costos = centro_costos.strip()
-            nueva.cuenta_contable = cuenta_contable.strip()
-            nueva.tipo_compra = tipo_compra.strip()
+        # Los datos de cabecera se escriben sobre el objeto en memoria; a la
+        # base solo llegan si el usuario confirma (`aplicar`).
+        for campo, valor in cabecera.items():
+            setattr(s, campo, valor)
 
-        despues = conservadas + [nueva]
-        _repartir_importe(s, despues, nueva, criterio_importe, importe_fijo,
-                          clase, antes)
+        if nombre.strip():
+            nueva = Partida(clase=clase, solicitud_id=s.id, origen="MASIVA")
+            if clase == CONCEPTO:
+                nueva.concepto_nombre = nombre.strip()
+            else:
+                nueva.insumo_nombre = nombre.strip()
+                nueva.centro_costos = centro_costos.strip()
+                nueva.cuenta_contable = cuenta_contable.strip()
+                nueva.tipo_compra = tipo_compra.strip()
+            despues = conservadas + [nueva]
+            _repartir_importe(s, despues, nueva, criterio_importe, importe_fijo,
+                              clase, antes)
+        else:
+            # Solo se reasignó cabecera: el desglose se queda como estaba, y el
+            # modo «reemplazar» no aplica porque no hay renglón que meter.
+            despues = [Partida(**{**p.__dict__}) for p in antes]
 
         cambio = Cambio(solicitud=s, partidas_antes=antes,
-                        partidas_despues=despues)
+                        partidas_despues=despues,
+                        toca_desglose=bool(nombre.strip()),
+                        importe_pospuesto=criterio_importe == EN_BLANCO)
         # Advertencia explícita cuando se pisa lo que trajo un CFDI: eso lo
         # timbró el SAT y sustituirlo a ciegas es perder el respaldo del gasto.
         if modo == REEMPLAZAR and any(p.origen == "CFDI" for p in antes):

@@ -13,12 +13,14 @@ existe pero avisa; la preparación y revisión del lote ya son plenamente usable
 from __future__ import annotations
 
 import asyncio
+import os
+import threading
 
 import flet as ft
 
-from core import asignacion, db, documentos
+from core import asignacion, conceptos as cat_conceptos, db, documentos
 from core.catalogos import (AMBIENTES, ETIQUETA_ESTADO, ETIQUETA_PARADA,
-                            PARADA_DEFECTO, PARADAS)
+                            PARADA_DEFECTO, PARADAS, TIPOS_BENEFICIARIO)
 from core.db import CONCEPTO, INSUMO, Lote, Partida, Solicitud
 from ui.alta_caratulas import AltaDesdeCaratulas
 from ui.asignacion_masiva import AsignacionMasiva
@@ -26,23 +28,81 @@ from ui.captura_solicitud import CapturaSolicitud
 from ui.carga_masiva import CargaMasiva
 from ui.comun import GRIS, NARANJA, ROJO, VERDE, color_estado, color_fila, fmt_importe
 from ui.componentes import (boton_herramienta, boton_primario, boton_secundario,
-                            campo_opciones, tarjeta_seccion)
+                            buscador, campo_opciones, fila_resultado,
+                            icono_accion, tarjeta_seccion)
 from ui.configuracion import ambiente_actual, navegador_visible
-from ui.tabla_responsiva import (DER, IZQ, Cabecera, ColumnaTabla, FilaDatos,
+from ui.tabla_responsiva import (DER, Cabecera, ColumnaTabla, FilaDatos,
                                  SegmentoCabecera, TablaResponsiva)
 
-# Porcentajes de ancho por columna; suman 100 (ver ui/tabla_responsiva.py).
-_COLUMNAS = [
-    ColumnaTabla("", 4),                       # selección
-    ColumnaTabla("", 4),                       # desplegar detalle
-    ColumnaTabla("Estado", 10, IZQ),
-    ColumnaTabla("Beneficiario", 20, IZQ),
-    ColumnaTabla("Tipo", 9, IZQ),
-    ColumnaTabla("Empresa", 13, IZQ),
-    ColumnaTabla("Fecha", 8),
-    ColumnaTabla("Importe", 11, DER),
-    ColumnaTabla("Punto de parada", 12, IZQ),
-    ColumnaTabla("Folio SIPP", 9),
+# Número de columnas de la tabla. Se necesita como constante para el colspan de
+# la banda de detalle, que se dibuja sin tener las columnas a la mano.
+_N_COLUMNAS = 11
+
+# Filas por página. Cada fila son once controles y el detalle desplegado suma
+# más: con un lote de doscientas, pintarlas todas manda al cliente miles de
+# controles por cada clic —marcar una casilla, desplegar un detalle— y la
+# navegación se siente trabada. Cincuenta llenan de sobra la pantalla.
+_POR_PAGINA = 50
+
+
+# Caracteres que caben en un renglón del detalle a size=11. Es una estimación:
+# la banda tiene ALTO FIJO —lo pide la tabla— así que hay que saber de antemano
+# cuánto va a ocupar el texto. Se queda corto a propósito: sobrar alto deja un
+# hueco, quedarse corto encima el texto sobre el desglose.
+_CHARS_POR_RENGLON = 140
+
+
+def _lineas_de(texto: str) -> int:
+    """Cuántos renglones ocupará un mensaje dentro de la banda de detalle."""
+    if not texto:
+        return 0
+    # Se respetan los saltos que ya trae (el validador junta varios motivos).
+    return sum(max(1, -(-len(linea) // _CHARS_POR_RENGLON))
+               for linea in texto.splitlines() or [texto])
+
+
+def _columnas(chk_todos: ft.Control) -> list[ColumnaTabla]:
+    """Las columnas de la tabla, con el check de «seleccionar todas» dentro.
+
+    Se construyen por instancia y no como constante de módulo porque una de
+    ellas lleva un CONTROL vivo: compartir la lista entre instancias haría que
+    la segunda le robara el checkbox a la primera, y Flet no permite que un
+    control tenga dos padres.
+
+    Los porcentajes suman 100 (ver ui/tabla_responsiva.py). La columna de
+    acciones lleva piso en píxeles porque su contenido son cuatro íconos de
+    tamaño fijo: por debajo de ese ancho no se encogen, se recortan.
+    """
+    # Todo centrado salvo el importe: las cantidades van a la derecha para que
+    # los pesos queden bajo los pesos y se puedan comparar de un vistazo, que
+    # es justo lo que se pierde al centrarlas ($192,293.00 y $1,000,000.00
+    # centradas no comparten ni el punto decimal ni el orden de magnitud).
+    return [
+        ColumnaTabla("", 4, encabezado_control=chk_todos),
+        ColumnaTabla("", 4),                       # desplegar detalle
+        ColumnaTabla("Estado", 9),
+        ColumnaTabla("Beneficiario", 18),
+        ColumnaTabla("Tipo", 8),
+        ColumnaTabla("Empresa", 11),
+        ColumnaTabla("Fecha", 7),
+        ColumnaTabla("Importe", 10, DER),
+        ColumnaTabla("Punto de parada", 10),
+        ColumnaTabla("Folio SIPP", 7),
+        ColumnaTabla("Acciones", 12, ancho_min_px=132),
+    ]
+
+# Las fuentes desde las que puede nacer una solicitud. Viven juntas en una lista
+# porque el modal de «Nueva solicitud» es exactamente esta lista: agregar una
+# fuente nueva (CFDI, cuando llegue) es agregar un renglón aquí.
+_FUENTES = [
+    ("manual", "Captura manual", "Una solicitud, llenando el formulario",
+     ft.Icons.EDIT_NOTE),
+    ("caratulas", "Alta desde carátulas",
+     "Una carátula, una solicitud: lee la CLABE y el titular de cada archivo",
+     ft.Icons.ACCOUNT_BALANCE),
+    ("excel", "Carga masiva desde Excel",
+     "Muchas solicitudes desde la plantilla, con vista previa fila por fila",
+     ft.Icons.UPLOAD_FILE),
 ]
 
 
@@ -58,6 +118,15 @@ class SeccionSolicitudes:
         self._expandidos: set[str] = set()
         self._seleccionados: set[str] = set()
         self._detener = False
+        # Despierta al hilo del motor si la app se cierra con el navegador
+        # abierto; None cuando no hay lote corriendo. Ver `_correr_lote`.
+        self._liberar_rpa = None
+        self._busqueda = ""
+        # Los tres tipos activos de entrada: el filtro sirve para acotar, no
+        # para esconder. `selected` de SegmentedButton es LISTA, no set (ver
+        # el aviso en ui/bitacora.py: un set revienta la serialización).
+        self._tipos: list[str] = list(TIPOS_BENEFICIARIO)
+        self._pagina = 0
         self.captura = CapturaSolicitud(app, self._recibir_solicitud)
         self.carga = CargaMasiva(app, self._tras_importar)
         self.alta_caratulas = AltaDesdeCaratulas(app, self._tras_importar)
@@ -101,77 +170,173 @@ class SeccionSolicitudes:
         self.btn_asignar = boton_herramienta(
             "Asignación masiva", ft.Icons.PLAYLIST_ADD_CHECK,
             on_click=self._asignacion_masiva)
-        self.btn_deshacer = boton_herramienta(
-            "Deshacer", ft.Icons.UNDO, on_click=self._deshacer)
-        self.btn_editar = boton_herramienta(
-            "Editar", ft.Icons.EDIT, on_click=self._editar)
-        self.btn_duplicar = boton_herramienta(
-            "Duplicar", ft.Icons.CONTENT_COPY, on_click=self._duplicar)
-        self.btn_omitir = boton_herramienta(
-            "Omitir", ft.Icons.BLOCK, on_click=self._omitir)
-        self.btn_eliminar = boton_herramienta(
-            "Eliminar", ft.Icons.DELETE_OUTLINE, on_click=self._eliminar,
-            destructivo=True)
+        self.btn_eliminar_todas = boton_herramienta(
+            "Eliminar todas", ft.Icons.DELETE_SWEEP, on_click=self._eliminar_todas,
+            tooltip="Vaciar el lote por completo", destructivo=True)
         self.btn_ejecutar = boton_primario(
             "Ejecutar lote", ft.Icons.PLAY_ARROW, on_click=self._ejecutar)
 
+        # --- Barra global: lo que aplica al lote entero, haya o no selección.
         # Mismo patrón anidado que `barra_lote` (ver el comentario de arriba).
-        barra_acciones = ft.Row(
+        self.barra_global = ft.Row(
             [ft.Row([boton_secundario("Nueva solicitud", ft.Icons.ADD,
-                                      on_click=self._nueva_solicitud),
-                     boton_secundario("Alta desde carátulas",
-                                      ft.Icons.ACCOUNT_BALANCE,
-                                      on_click=self._alta_caratulas,
-                                      tooltip="Una carátula, una solicitud: "
-                                              "toma el beneficiario del nombre "
-                                              "del archivo y completa con Excel"),
-                     boton_secundario("Carga masiva", ft.Icons.UPLOAD_FILE,
-                                      on_click=self._carga_masiva,
-                                      tooltip="Dar de alta muchas solicitudes "
-                                              "desde un Excel"),
+                                      on_click=self._nueva_solicitud,
+                                      tooltip="Elegir de dónde sale la "
+                                              "solicitud: captura, carátulas "
+                                              "o Excel"),
                      boton_secundario("Adjuntar por carpeta",
                                       ft.Icons.DRIVE_FOLDER_UPLOAD,
                                       on_click=self._adjuntar_carpeta,
                                       tooltip="Asignar carátulas o Vo.Bo. a "
                                               "todo el lote, emparejando por "
                                               "el nombre del beneficiario"),
-                     self.btn_asignar, self.btn_deshacer,
-                     self.btn_editar, self.btn_duplicar, self.btn_omitir,
-                     self.btn_eliminar],
+                     self.btn_asignar, self.btn_eliminar_todas],
                     spacing=8, wrap=True, expand=True,
                     vertical_alignment=ft.CrossAxisAlignment.CENTER),
              self.txt_resumen,
              self.btn_ejecutar],
             spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER)
 
-        self.tabla = TablaResponsiva(self.page, _COLUMNAS)
+        # --- Barra contextual: aparece SOLO con filas seleccionadas.
+        # Sustituye a la global en vez de sumarse a ella, y esa es la razón de
+        # que exista: las acciones sobre la selección no tienen sentido sin
+        # selección, y tenerlas ahí apagadas obliga a leer botones muertos cada
+        # vez que se mira la barra.
+        self.txt_seleccion = ft.Text("", weight=ft.FontWeight.BOLD)
+        self.barra_seleccion = ft.Row(
+            [ft.Row([ft.Icon(ft.Icons.CHECK_CIRCLE, size=18,
+                             color=ft.Colors.PRIMARY_CONTAINER),
+                     self.txt_seleccion,
+                     boton_herramienta("Omitir", ft.Icons.BLOCK,
+                                       on_click=self._omitir,
+                                       tooltip="No capturar estas solicitudes "
+                                               "al ejecutar el lote"),
+                     boton_herramienta("Eliminar", ft.Icons.DELETE_OUTLINE,
+                                       on_click=self._eliminar_seleccionadas,
+                                       destructivo=True),
+                     boton_herramienta("Asignación masiva",
+                                       ft.Icons.PLAYLIST_ADD_CHECK,
+                                       on_click=self._asignacion_masiva),
+                     boton_herramienta("Limpiar selección", ft.Icons.CLOSE,
+                                       on_click=self._limpiar_seleccion)],
+                    spacing=8, wrap=True, expand=True,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER)],
+            spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            visible=False)
+
+        # --- Barra de filtros: buscador por beneficiario + tipos.
+        self.tf_buscar = buscador("Buscar beneficiario…", width=320)
+        self.tf_buscar.on_change = self._cambiar_busqueda
+        self.btn_limpiar_busqueda = icono_accion(
+            ft.Icons.CLOSE, "Limpiar búsqueda", self._limpiar_busqueda,
+            color=GRIS)
+        self.btn_limpiar_busqueda.visible = False
+        self.tf_buscar.suffix = self.btn_limpiar_busqueda
+
+        # `allow_empty_selection=False`: quedarse sin ningún tipo marcado
+        # dejaría la tabla vacía sin que se vea por qué. Con los tres marcados
+        # no filtra nada, que es el estado natural.
+        self.filtro_tipos = ft.SegmentedButton(
+            selected=list(self._tipos),
+            allow_multiple_selection=True,
+            allow_empty_selection=False,
+            segments=[ft.Segment(t, label=ft.Text(t))
+                      for t in TIPOS_BENEFICIARIO],
+            on_change=self._cambiar_tipos)
+        self.txt_filtrado = ft.Text("", color=GRIS, size=12)
+
+        barra_filtros = ft.Row(
+            [ft.Row([self.tf_buscar, self.filtro_tipos, self.txt_filtrado],
+                    spacing=12, wrap=True, expand=True,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER)],
+            spacing=12, vertical_alignment=ft.CrossAxisAlignment.CENTER)
+
+        # El check del encabezado se construye UNA vez y se muta: la tabla no
+        # recrea su encabezado al repintar, justo para no re-parentear este
+        # control (ver ui/tabla_responsiva.py).
+        self.chk_todos = ft.Checkbox(
+            value=False, scale=0.85, tooltip="Seleccionar todas",
+            on_change=self._alternar_todos)
+
+        # --- Paginación.
+        self.btn_pag_anterior = icono_accion(
+            ft.Icons.CHEVRON_LEFT, "Página anterior",
+            lambda _e: self._mover_pagina(-1))
+        self.btn_pag_siguiente = icono_accion(
+            ft.Icons.CHEVRON_RIGHT, "Página siguiente",
+            lambda _e: self._mover_pagina(1))
+        self.txt_pagina = ft.Text("", color=GRIS, size=12)
+        self.barra_paginacion = ft.Row(
+            [ft.Container(expand=True), self.btn_pag_anterior,
+             self.txt_pagina, self.btn_pag_siguiente],
+            spacing=6, vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            visible=False)
+
+        self.tabla = TablaResponsiva(self.page, _columnas(self.chk_todos))
         self.vacio = ft.Container(
             content=ft.Column(
                 [ft.Icon(ft.Icons.RECEIPT_LONG, size=40, color=GRIS),
                  ft.Text("Este lote todavía no tiene solicitudes.",
                          theme_style=ft.TextThemeStyle.BODY_LARGE),
-                 ft.Text("Captúralas a mano con «Nueva solicitud», o cárgalas "
-                         "desde Documentos cuando esté disponible la ingesta.",
+                 ft.Text("Usa «Nueva solicitud» y elige de dónde sale: captura "
+                         "a mano, desde las carátulas o desde un Excel.",
                          color=GRIS, text_align=ft.TextAlign.CENTER)],
+                spacing=8, tight=True,
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER),
+            alignment=ft.Alignment(0, 0), padding=40, visible=False)
+
+        # Vacío por filtro ≠ lote vacío: con un solo mensaje, buscar a alguien
+        # que no está invitaría a pensar que el lote se quedó sin solicitudes.
+        self.txt_sin_resultados = ft.Text("", color=GRIS,
+                                          text_align=ft.TextAlign.CENTER)
+        self.sin_resultados = ft.Container(
+            content=ft.Column(
+                [ft.Icon(ft.Icons.SEARCH_OFF, size=40, color=GRIS),
+                 ft.Text("Ninguna solicitud coincide con el filtro.",
+                         theme_style=ft.TextThemeStyle.BODY_LARGE),
+                 self.txt_sin_resultados,
+                 boton_secundario("Quitar los filtros", ft.Icons.FILTER_ALT_OFF,
+                                  on_click=self._quitar_filtros)],
                 spacing=8, tight=True,
                 horizontal_alignment=ft.CrossAxisAlignment.CENTER),
             alignment=ft.Alignment(0, 0), padding=40, visible=False)
 
         self.contenido = ft.Column(
             [tarjeta_seccion(ft.Column([barra_lote, ft.Divider(),
-                                        barra_acciones], spacing=12,
-                                       tight=True)),
+                                        self.barra_global,
+                                        self.barra_seleccion,
+                                        ft.Divider(), barra_filtros],
+                                       spacing=12, tight=True)),
              ft.Container(
-                 content=ft.Column([self.tabla.control, self.vacio],
+                 content=ft.Column([self.tabla.control, self.vacio,
+                                    self.sin_resultados],
                                    scroll=ft.ScrollMode.AUTO, expand=True,
                                    horizontal_alignment=ft.CrossAxisAlignment.STRETCH),
-                 expand=True)],
+                 expand=True),
+             self.barra_paginacion],
             spacing=16, expand=True,
             horizontal_alignment=ft.CrossAxisAlignment.STRETCH)
 
     def _on_resize(self, _e=None) -> None:
         """La tabla se remide sola con `on_size_change`; no hay nada que
         reacomodar aquí. Presente por el contrato de pantalla del shell."""
+
+    def _marcar_detener(self) -> None:
+        self._detener = True
+
+    def cerrar_rpa(self) -> None:
+        """Suelta el navegador si quedó abierto. Lo llama el shell al salir.
+
+        Sin esto, cerrar la ventana con el navegador esperando dejaría un
+        Chromium huérfano consumiendo memoria hasta reiniciar el equipo: el
+        proceso no cuelga de la ventana de la app, sino del hilo del motor.
+        """
+        liberar = self._liberar_rpa
+        if callable(liberar):
+            try:
+                liberar()
+            except Exception:  # noqa: BLE001 — cerrando, nada debe estorbar
+                pass
 
     # -------------------------------------------------------- ambiente
     def _pintar_ambiente(self) -> None:
@@ -233,23 +398,101 @@ class SeccionSolicitudes:
         self._expandidos &= vivos
         self._pintar()
 
+    # ------------------------------------------------------------ filtros
+    def _coincide(self, s: Solicitud) -> bool:
+        """True si la solicitud pasa el buscador y el filtro de tipos.
+
+        El nombre se compara con `conceptos.normalizar`, el mismo criterio del
+        catálogo: buscar «jose muñoz» encuentra «JOSÉ MUÑOZ» sin depender de
+        acentos. Las palabras van sueltas y en cualquier orden, porque nadie
+        recuerda si el apellido iba antes o después.
+        """
+        if s.tipo_beneficiario not in self._tipos:
+            return False
+        palabras = cat_conceptos.normalizar(self._busqueda).split()
+        if not palabras:
+            return True
+        nombre = cat_conceptos.normalizar(s.beneficiario_nombre or "")
+        return all(p in nombre for p in palabras)
+
+    def _visibles(self) -> list[Solicitud]:
+        """Las solicitudes que pasan los filtros, en el orden del lote."""
+        return [s for s in self._solicitudes if self._coincide(s)]
+
+    def _filtrando(self) -> bool:
+        return bool(cat_conceptos.normalizar(self._busqueda)) or \
+            len(self._tipos) != len(TIPOS_BENEFICIARIO)
+
+    def _cambiar_busqueda(self, _e=None) -> None:
+        self._busqueda = self.tf_buscar.value or ""
+        self._pagina = 0          # filtrar y quedarse en la página 7 no tiene
+        self._pintar()            # sentido: el resultado suele caber en una
+
+    def _limpiar_busqueda(self, _e=None) -> None:
+        self.tf_buscar.value = ""
+        self._busqueda = ""
+        self._pagina = 0
+        self._pintar()
+
+    def _cambiar_tipos(self, e=None) -> None:
+        seleccion = list(getattr(e.control, "selected", None) or []) if e else []
+        self._tipos = seleccion or list(TIPOS_BENEFICIARIO)
+        self._pagina = 0
+        self._pintar()
+
+    def _quitar_filtros(self, _e=None) -> None:
+        self.tf_buscar.value = ""
+        self._busqueda = ""
+        self._tipos = list(TIPOS_BENEFICIARIO)
+        self.filtro_tipos.selected = list(TIPOS_BENEFICIARIO)
+        self._pagina = 0
+        self._pintar()
+
+    def _mover_pagina(self, delta: int) -> None:
+        self._pagina += delta
+        self._pintar()
+
     # ------------------------------------------------------------ pintado
     def _pintar(self) -> None:
+        visibles = self._visibles()
+        # La página se recorta aquí y no al cambiarla: borrar o filtrar puede
+        # dejarla fuera de rango, y una tabla vacía con filas detrás es un
+        # estado del que el usuario no sabe salir.
+        paginas = max(1, -(-len(visibles) // _POR_PAGINA))
+        self._pagina = max(0, min(self._pagina, paginas - 1))
+        desde = self._pagina * _POR_PAGINA
+        pagina = visibles[desde:desde + _POR_PAGINA]
+
         filas: list = []
-        for s in self._solicitudes:
+        for s in pagina:
             filas.append(self._fila_solicitud(s))
             if s.id in self._expandidos:
                 filas.append(self._fila_detalle(s))
         self.tabla.set_contenido(filas)
-        hay = bool(self._solicitudes)
-        self.vacio.visible = not hay
-        self.tabla.control.visible = hay
+
+        hay_lote = bool(self._solicitudes)
+        self.vacio.visible = not hay_lote
+        self.sin_resultados.visible = hay_lote and not visibles
+        self.tabla.control.visible = bool(pagina)
+        self.txt_sin_resultados.value = (
+            f"Ninguna de las {len(self._solicitudes)} solicitudes del lote "
+            f"coincide con lo que buscas.")
+
+        self.barra_paginacion.visible = paginas > 1
+        self.txt_pagina.value = (
+            f"{desde + 1}–{desde + len(pagina)} de {len(visibles)}  ·  "
+            f"página {self._pagina + 1} de {paginas}")
+        self.btn_pag_anterior.disabled = self._pagina == 0
+        self.btn_pag_siguiente.disabled = self._pagina >= paginas - 1
+
+        self.btn_limpiar_busqueda.visible = bool(self._busqueda.strip())
+        self.txt_filtrado.value = (
+            f"{len(visibles)} de {len(self._solicitudes)}"
+            if self._filtrando() else "")
+
         self._actualizar_resumen()
         self._actualizar_acciones()
-        try:
-            self.contenido.update()
-        except Exception:  # noqa: BLE001 — aún no montado en la página
-            pass
+        self._refrescar()
 
     def _fila_solicitud(self, s: Solicitud) -> FilaDatos:
         chk = ft.Checkbox(
@@ -272,8 +515,39 @@ class SeccionSolicitudes:
         return FilaDatos(
             [chk, chevron, estado, s.beneficiario_nombre or "—",
              s.tipo_beneficiario, s.empresa or "—", s.fecha_pago or "—",
-             fmt_importe(s.importe_total), parada, s.folio_sipp or "—"],
+             fmt_importe(s.importe_total), parada, s.folio_sipp or "—",
+             self._acciones_fila(s)],
             bgcolor=color_fila(s.estado))
+
+    def _acciones_fila(self, s: Solicitud) -> ft.Control:
+        """Los cuatro botones que actúan sobre ESTA solicitud.
+
+        Van en la fila y no en la barra porque son acciones de una sola
+        solicitud: obligar a seleccionarla primero añade un clic y, peor, deja
+        una selección viva que después se arrastra a la siguiente acción masiva
+        sin que nadie lo note.
+        """
+        puede_deshacer = self._lote is not None and db.solicitud_en_snapshot(
+            self._lote.id, s.id)
+        return ft.Row(
+            [icono_accion(ft.Icons.EDIT, "Editar esta solicitud",
+                          lambda _e, sid=s.id: self._editar(sid)),
+             icono_accion(ft.Icons.CONTENT_COPY, "Duplicar esta solicitud",
+                          lambda _e, sid=s.id: self._duplicar(sid)),
+             icono_accion(
+                 ft.Icons.UNDO,
+                 ("Revertir esta solicitud a como estaba antes de la última "
+                  "operación masiva" if puede_deshacer else
+                  "Esta solicitud no cambió en la última operación masiva"),
+                 (lambda _e, sid=s.id: self._deshacer_fila(sid))
+                 if puede_deshacer else None,
+                 color=None if puede_deshacer else ft.Colors.OUTLINE_VARIANT),
+             icono_accion(ft.Icons.DELETE_OUTLINE, "Eliminar esta solicitud",
+                          lambda _e, sid=s.id: self._eliminar(sid),
+                          color=ft.Colors.ERROR)],
+            spacing=4, tight=True,
+            alignment=ft.MainAxisAlignment.CENTER,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER)
 
     def _fila_detalle(self, s: Solicitud) -> Cabecera:
         """Banda con el desglose de la solicitud, sangrada bajo su fila."""
@@ -310,35 +584,72 @@ class SeccionSolicitudes:
                  spacing=2, tight=True)],
             spacing=32, vertical_alignment=ft.CrossAxisAlignment.START,
             expand=True)
+        # El motivo de «Revisar a mano» va en su propia banda, con separador e
+        # ícono: pegado al desglose se leía como un renglón más del pago, y es
+        # lo contrario —la razón por la que ese pago NO se va a capturar—.
+        lineas_error = 0
         if s.error_msg:
+            lineas_error = _lineas_de(s.error_msg)
             detalle = ft.Column(
                 [detalle,
-                 ft.Text(s.error_msg, size=11, color=ROJO)],
+                 ft.Divider(height=1),
+                 ft.Row([ft.Icon(ft.Icons.ERROR_OUTLINE, size=14, color=ROJO),
+                         ft.Text(s.error_msg, size=11, color=ROJO, expand=True)],
+                        spacing=6,
+                        vertical_alignment=ft.CrossAxisAlignment.START)],
                 spacing=6, tight=True)
 
         # Alto estimado por el bloque más largo, para que la banda no recorte.
-        renglones = max(len(conceptos), len(insumos), 2) + 1
+        # El error suma sus propios renglones: sin contarlos, un mensaje largo
+        # se dibujaba ENCIMA del desglose en vez de debajo.
+        renglones = max(len(conceptos), len(insumos), 2) + 1 + lineas_error
+        extra_error = 14 if s.error_msg else 0   # el divisor y su holgura
         return Cabecera(
             [SegmentoCabecera(2, ft.Container()),
-             SegmentoCabecera(len(_COLUMNAS) - 2, detalle,
+             SegmentoCabecera(_N_COLUMNAS - 2, detalle,
                               padding=ft.Padding.symmetric(vertical=8))],
             bgcolor=ft.Colors.SURFACE_CONTAINER_LOW,
-            alto=max(64, 18 * renglones + 24))
+            alto=max(64, 18 * renglones + 24 + extra_error))
 
     def _texto_documentos(self, s: Solicitud) -> ft.Control:
-        """Qué archivos tiene la solicitud, y si le falta alguno obligatorio."""
+        """Los archivos de la solicitud, abribles con un clic.
+
+        Se abren en el visor del sistema en vez de dentro de la herramienta:
+        para comprobar que la CLABE leída es la de la carátula hace falta ver el
+        documento a tamaño real y poder acercarse, y eso ya lo hace bien el
+        visor de PDF o de imágenes que la persona usa todos los días.
+        """
         archivos = documentos.de_solicitud(s.id)
-        partes = []
+        controles: list[ft.Control] = [
+            ft.Text("Documentos:", size=11, color=GRIS)]
+
+        def enlace(etiqueta: str, ruta: str, icono) -> ft.Control:
+            return ft.Container(
+                content=ft.Row(
+                    [ft.Icon(icono, size=13, color=ft.Colors.PRIMARY),
+                     ft.Text(etiqueta, size=11, color=ft.Colors.PRIMARY,
+                             weight=ft.FontWeight.W_500)],
+                    spacing=3, tight=True),
+                padding=ft.Padding.symmetric(horizontal=6, vertical=2),
+                border_radius=4, ink=True,
+                tooltip=f"Abrir {os.path.basename(ruta)}",
+                on_click=lambda _e, r=ruta: self.app.abrir_en_sistema(r))
+
         if archivos.get("caratula"):
-            partes.append("carátula ✓")
+            controles.append(enlace("Carátula", archivos["caratula"],
+                                    ft.Icons.ACCOUNT_BALANCE))
         elif documentos.falta_caratula(s):
-            return ft.Text("Documentos: FALTA LA CARÁTULA (obligatoria para "
-                           "dar de alta la cuenta)", size=11, color=ROJO,
-                           weight=ft.FontWeight.BOLD)
+            controles.append(
+                ft.Text("FALTA LA CARÁTULA (obligatoria para dar de alta la "
+                        "cuenta)", size=11, color=ROJO,
+                        weight=ft.FontWeight.BOLD))
         if archivos.get("vobo"):
-            partes.append("Vo.Bo. ✓")
-        return ft.Text(f"Documentos: {' · '.join(partes) if partes else '—'}",
-                       size=11, color=GRIS)
+            controles.append(enlace("Vo.Bo. de compras", archivos["vobo"],
+                                    ft.Icons.FACT_CHECK))
+        if len(controles) == 1:
+            controles.append(ft.Text("—", size=11, color=GRIS))
+        return ft.Row(controles, spacing=4, tight=True, wrap=True,
+                      vertical_alignment=ft.CrossAxisAlignment.CENTER)
 
     def _actualizar_resumen(self) -> None:
         if not self._lote:
@@ -352,30 +663,71 @@ class SeccionSolicitudes:
             f"{listas} lista{'s' if listas != 1 else ''} · {fmt_importe(total)}")
 
     def _actualizar_acciones(self) -> None:
-        uno = len(self._seleccionados) == 1
-        alguno = bool(self._seleccionados)
-        self.btn_editar.disabled = not uno
-        self.btn_duplicar.disabled = not uno
-        self.btn_omitir.disabled = not alguno
-        self.btn_eliminar.disabled = not alguno
+        """Estado de las dos barras según la selección.
+
+        La global y la contextual se excluyen: con filas seleccionadas se ve la
+        segunda y no la primera. Lo único que sobrevive a los dos modos es
+        «Ejecutar lote», porque ejecutar no depende de lo que esté marcado.
+        """
+        n = len(self._seleccionados)
+        self.barra_seleccion.visible = n > 0
+        self.barra_global.visible = n == 0
+        self.txt_seleccion.value = (
+            f"{n} seleccionada{'s' if n != 1 else ''}")
         self.btn_asignar.disabled = not self._solicitudes
+        self.btn_eliminar_todas.disabled = not self._solicitudes
         self.btn_ejecutar.disabled = not self._solicitudes
-        # «Deshacer» solo tiene sentido si hay algo que deshacer, y decirlo en
-        # el tooltip evita que alguien lo pulse esperando otra cosa.
-        snap = db.hay_snapshot(self._lote.id) if self._lote else None
-        self.btn_deshacer.disabled = snap is None
-        self.btn_deshacer.tooltip = (
-            f"Revertir: {snap['motivo']} ({snap['creado_en'][:16].replace('T', ' ')})"
-            if snap else "No hay ninguna operación masiva que deshacer")
+        # El check del encabezado refleja la selección en vez de mandarla: si
+        # se marcan las filas una por una hasta completarlas todas, tiene que
+        # aparecer marcado, no seguir vacío. Se mide contra lo VISIBLE, que es
+        # sobre lo que actúa al pulsarlo.
+        visibles = {s.id for s in self._visibles()}
+        self.chk_todos.value = bool(visibles) and visibles <= self._seleccionados
+        self.chk_todos.tooltip = ("Quitar la selección" if self.chk_todos.value
+                                  else "Seleccionar todas")
 
     # ------------------------------------------------------------ eventos
+    def _refrescar(self) -> None:
+        """Repinta la pantalla si ya está montada.
+
+        Todo lo que reacciona a un clic pasa por aquí: antes de que la pantalla
+        esté en la página, `update()` lanza, y las acciones que no lo protegían
+        reventaban al ejercitarlas fuera de la ventana.
+        """
+        try:
+            self.contenido.update()
+        except Exception:  # noqa: BLE001 — aún no montada en la página
+            pass
+
     def _alternar_seleccion(self, sid: str, e) -> None:
         if e.control.value:
             self._seleccionados.add(sid)
         else:
             self._seleccionados.discard(sid)
         self._actualizar_acciones()
-        self.contenido.update()
+        self._refrescar()
+
+    def _alternar_todos(self, e=None) -> None:
+        """Check del encabezado: marca o desmarca lo que el filtro deja ver.
+
+        Actúa sobre TODO lo filtrado y no solo sobre la página en pantalla: el
+        caso de uso es «filtra los Proveedores y aplícales algo», y tener que
+        marcar página por página lo volvería inútil. Lo que el filtro esconde no
+        se toca, ni para marcar ni para desmarcar.
+        """
+        marcar = bool(e.control.value) if e is not None else True
+        visibles = {s.id for s in self._visibles()}
+        if marcar:
+            self._seleccionados |= visibles
+        else:
+            self._seleccionados -= visibles
+        # Repintado completo: hay que mover el check de CADA fila, y viven en
+        # controles que la tabla recrea al pintar el cuerpo.
+        self._pintar()
+
+    def _limpiar_seleccion(self, _e=None) -> None:
+        self._seleccionados.clear()
+        self._pintar()
 
     def _alternar_detalle(self, sid: str) -> None:
         if sid in self._expandidos:
@@ -384,10 +736,7 @@ class SeccionSolicitudes:
             self._expandidos.add(sid)
         self._pintar()
 
-    def _seleccionada(self) -> Solicitud | None:
-        if len(self._seleccionados) != 1:
-            return None
-        sid = next(iter(self._seleccionados))
+    def _solicitud(self, sid: str) -> Solicitud | None:
         return next((s for s in self._solicitudes if s.id == sid), None)
 
     # ------------------------------------------------------------ lotes
@@ -429,26 +778,67 @@ class SeccionSolicitudes:
 
     # ------------------------------------------------------- solicitudes
     def _nueva_solicitud(self, _e=None) -> None:
+        """Pregunta de dónde sale la solicitud antes de abrir nada.
+
+        Las tres fuentes producen lo mismo —solicitudes en este lote— pero se
+        usan en momentos distintos, y tenerlas como tres botones sueltos en la
+        barra obligaba a saber de antemano cuál era cuál. Aquí cada una se
+        explica en su renglón.
+        """
         if not self._lote:
             self.app.avisar("Primero crea un lote.", NARANJA)
             return
-        self.captura.abrir(self._lote.id)
 
-    def _editar(self, _e=None) -> None:
-        s = self._seleccionada()
+        abrir = {"manual": lambda: self.captura.abrir(self._lote.id),
+                 "caratulas": lambda: self.alta_caratulas.abrir(self._lote.id),
+                 "excel": lambda: self.carga.abrir(self._lote.id)}
+
+        def elegir(clave: str):
+            def _accion(_e=None) -> None:
+                self.page.pop_dialog()
+                abrir[clave]()
+            return _accion
+
+        opciones = [
+            ft.Container(
+                ft.Row([ft.Icon(icono, color=ft.Colors.PRIMARY_CONTAINER),
+                        ft.Column([ft.Text(titulo, size=13,
+                                           weight=ft.FontWeight.BOLD),
+                                   ft.Text(detalle, size=11, color=GRIS)],
+                                  spacing=0, tight=True, expand=True)],
+                       spacing=12,
+                       vertical_alignment=ft.CrossAxisAlignment.CENTER),
+                padding=ft.Padding.symmetric(horizontal=12, vertical=10),
+                border_radius=8, ink=True, on_click=elegir(clave))
+            for clave, titulo, detalle, icono in _FUENTES
+        ]
+
+        self.page.show_dialog(ft.AlertDialog(
+            modal=True,
+            title=ft.Text("Nueva solicitud"),
+            content=ft.Column(
+                [ft.Text("¿De dónde sale esta solicitud?", color=GRIS),
+                 *opciones],
+                spacing=4, tight=True, width=460),
+            actions=[ft.TextButton(
+                "Cancelar", on_click=lambda _e: self.page.pop_dialog())],
+            actions_alignment=ft.MainAxisAlignment.END))
+
+    def _editar(self, sid: str) -> None:
+        s = self._solicitud(sid)
         if not s:
             return
         self.captura.abrir(self._lote.id, s, self._partidas.get(s.id, []))
 
-    def _duplicar(self, _e=None) -> None:
-        """Abre el editor con una copia de la solicitud seleccionada.
+    def _duplicar(self, sid: str) -> None:
+        """Abre el editor con una copia de la solicitud.
 
         No la guarda de inmediato a propósito: una copia idéntica produce la
         MISMA clave de idempotencia y sería rechazada. Duplicar sirve para
         partir de una solicitud parecida y cambiarle lo que toque —el
         beneficiario, el importe—, y eso solo puede hacerlo el usuario.
         """
-        s = self._seleccionada()
+        s = self._solicitud(sid)
         if not s:
             return
         copia = Solicitud(**{**s.__dict__})
@@ -464,33 +854,154 @@ class SeccionSolicitudes:
                     for p in self._partidas.get(s.id, [])]
         self.captura.abrir(self._lote.id, copia, partidas)
 
-    def _omitir(self, _e=None) -> None:
-        for sid in list(self._seleccionados):
-            db.actualizar_estado(sid, "OMITIDA")
-        self._recargar_solicitudes()
-        self.app.avisar("Solicitudes marcadas como omitidas.", NARANJA)
+    def _deshacer_fila(self, sid: str) -> None:
+        """Revierte UNA solicitud a como estaba antes de la última masiva.
 
-    def _eliminar(self, _e=None) -> None:
-        cuantas = len(self._seleccionados)
+        No consume el snapshot (ver `db.restaurar_solicitud_snapshot`): lo
+        normal es que una asignación masiva quede bien en casi todo el lote y
+        mal en una o dos, y arreglar la primera no puede dejar a las otras sin
+        vuelta atrás.
+        """
+        if not self._lote:
+            return
+        s = self._solicitud(sid)
+        nombre = s.beneficiario_nombre if s else "la solicitud"
 
         def confirmar(_e=None) -> None:
             self.page.pop_dialog()
-            for sid in list(self._seleccionados):
-                db.borrar_solicitud(sid)
-            self._seleccionados.clear()
+            if db.restaurar_solicitud_snapshot(self._lote.id, sid):
+                self._recargar_solicitudes()
+                self.app.avisar(
+                    f"«{nombre}» volvió a como estaba antes de la última "
+                    f"operación masiva.", VERDE)
+            else:
+                self.app.avisar("Esa solicitud no tiene un estado anterior al "
+                                "que volver.", NARANJA)
+
+        snap = db.hay_snapshot(self._lote.id)
+        cuando = (snap["creado_en"][:16].replace("T", " ") if snap else "")
+        self.page.show_dialog(ft.AlertDialog(
+            modal=True,
+            title=ft.Text("Deshacer en esta solicitud"),
+            content=ft.Text(
+                f"«{nombre}» volverá a como estaba antes de "
+                f"«{snap['motivo'] if snap else 'la operación'}» ({cuando}).\n\n"
+                "El resto del lote se queda como está, y se pierde lo que le "
+                "hayas cambiado a mano después."),
+            actions=[
+                ft.TextButton("Cancelar",
+                              on_click=lambda _e: self.page.pop_dialog()),
+                ft.FilledButton("Deshacer", icon=ft.Icons.UNDO,
+                                on_click=confirmar),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END))
+
+    def _omitir(self, _e=None) -> None:
+        for sid in list(self._seleccionados):
+            db.actualizar_estado(sid, "OMITIDA")
+        cuantas = len(self._seleccionados)
+        self._seleccionados.clear()
+        self._recargar_solicitudes()
+        self.app.avisar(f"{cuantas} solicitud(es) marcadas como omitidas.",
+                        NARANJA)
+
+    def _eliminar_seleccionadas(self, _e=None) -> None:
+        """Manejador del botón de la barra: borra lo que esté seleccionado.
+
+        Existe separado de `_eliminar` a propósito. Flet pasa el evento como
+        PRIMER argumento posicional, así que enganchar `on_click=self._eliminar`
+        metía el objeto del evento en `sid` y la pantalla intentaba borrar una
+        solicitud con ese id: no encontraba ninguna y reventaba al confirmar.
+        Con dos métodos, uno por cada punto de entrada, no hay forma de que el
+        evento se confunda con un dato.
+        """
+        self._eliminar()
+
+    def _eliminar(self, sid: str | None = None) -> None:
+        """Elimina una solicitud (por su id) o todas las seleccionadas.
+
+        Es la misma acción desde dos lados —el ícono de la fila y la barra de
+        selección—, así que comparte confirmación: cambiar solo el texto evita
+        dos diálogos que se pueden desincronizar.
+        """
+        objetivo = [sid] if sid else list(self._seleccionados)
+        if not objetivo:
+            return
+        if sid:
+            s = self._solicitud(sid)
+            que = f"«{s.beneficiario_nombre or 'sin beneficiario'}»" if s \
+                else "la solicitud"
+        else:
+            que = f"{len(objetivo)} solicitud(es)"
+
+        def confirmar(_e=None) -> None:
+            self.page.pop_dialog()
+            for uno in objetivo:
+                db.borrar_solicitud(uno)
+                self._seleccionados.discard(uno)
             self._recargar_solicitudes()
-            self.app.avisar(f"{cuantas} solicitud(es) eliminadas.", VERDE)
+            self.app.avisar(f"Se eliminó {que}.", VERDE)
 
         self.page.show_dialog(ft.AlertDialog(
             modal=True,
-            title=ft.Text("Eliminar solicitudes"),
+            title=ft.Text("Eliminar"),
             content=ft.Text(
-                f"Se eliminarán {cuantas} solicitud(es) con su desglose y su "
-                "bitácora. Esto no se puede deshacer."),
+                f"Se eliminará {que} con su desglose y su bitácora. Esto no se "
+                "puede deshacer."),
             actions=[
                 ft.TextButton("Cancelar",
                               on_click=lambda _e: self.page.pop_dialog()),
                 ft.FilledButton("Eliminar", icon=ft.Icons.DELETE_OUTLINE,
+                                on_click=confirmar),
+            ],
+            actions_alignment=ft.MainAxisAlignment.END))
+
+    def _eliminar_todas(self, _e=None) -> None:
+        """Vacía el lote entero.
+
+        Se confirma nombrando cuántas y por cuánto: «eliminar todas» es la única
+        acción de la barra que no se puede acotar con la selección, y el número
+        es lo que hace notar si el lote activo no era el que se creía.
+        """
+        if not self._solicitudes:
+            return
+        cuantas = len(self._solicitudes)
+        total = sum(s.importe_total for s in self._solicitudes)
+        capturadas = sum(1 for s in self._solicitudes
+                         if s.estado in ("GUARDADA", "ENVIADA_AUTORIZAR"))
+
+        def confirmar(_e=None) -> None:
+            self.page.pop_dialog()
+            for s in list(self._solicitudes):
+                db.borrar_solicitud(s.id)
+            self._seleccionados.clear()
+            self._expandidos.clear()
+            self._recargar_solicitudes()
+            self.app.avisar(f"El lote quedó vacío: {cuantas} solicitud(es) "
+                            f"eliminadas.", VERDE)
+
+        detalle = [
+            ft.Text(f"Se eliminarán las {cuantas} solicitudes del lote "
+                    f"«{self._lote.nombre}», por {fmt_importe(total)}, con su "
+                    f"desglose y su bitácora."),
+            ft.Text("Esto no se puede deshacer.", color=NARANJA),
+        ]
+        if capturadas:
+            # Borrarlas de aquí no las cancela en SIPP: el folio ya se consumió
+            # y quedaría vivo allá sin nada de este lado que lo explique.
+            detalle.append(ft.Text(
+                f"{capturadas} ya se capturaron en SIPP. Borrarlas aquí NO las "
+                f"cancela allá: su folio seguirá vivo en el portal.",
+                color=ROJO, weight=ft.FontWeight.BOLD))
+
+        self.page.show_dialog(ft.AlertDialog(
+            modal=True,
+            title=ft.Text("Eliminar todas las solicitudes"),
+            content=ft.Column(detalle, spacing=8, tight=True),
+            actions=[
+                ft.TextButton("Cancelar",
+                              on_click=lambda _e: self.page.pop_dialog()),
+                ft.FilledButton("Eliminar todas", icon=ft.Icons.DELETE_SWEEP,
                                 on_click=confirmar),
             ],
             actions_alignment=ft.MainAxisAlignment.END))
@@ -514,19 +1025,6 @@ class SeccionSolicitudes:
         self._recargar_solicitudes()
         self.app.avisar("Solicitud guardada.", VERDE)
 
-    # ------------------------------------------------------------ ejecución
-    def _carga_masiva(self, _e=None) -> None:
-        if not self._lote:
-            self.app.avisar("Primero crea un lote.", NARANJA)
-            return
-        self.carga.abrir(self._lote.id)
-
-    def _alta_caratulas(self, _e=None) -> None:
-        if not self._lote:
-            self.app.avisar("Primero crea un lote.", NARANJA)
-            return
-        self.alta_caratulas.abrir(self._lote.id)
-
     # ------------------------------------------------------- masivas
     def _asignacion_masiva(self, _e=None) -> None:
         if not self._lote or not self._solicitudes:
@@ -534,39 +1032,8 @@ class SeccionSolicitudes:
             return
         self.asignacion.abrir(self._lote.id, self._seleccionados)
 
-    def _deshacer(self, _e=None) -> None:
-        """Revierte la última operación masiva del lote."""
-        if not self._lote:
-            return
-        snap = db.hay_snapshot(self._lote.id)
-        if not snap:
-            self.app.avisar("No hay ninguna operación masiva que deshacer.",
-                            NARANJA)
-            return
-
-        def confirmar(_e=None) -> None:
-            self.page.pop_dialog()
-            if asignacion.deshacer(self._lote.id):
-                self._recargar_solicitudes()
-                self.app.avisar("Lote restaurado al estado anterior.", VERDE)
-
-        self.page.show_dialog(ft.AlertDialog(
-            modal=True,
-            title=ft.Text("Deshacer la última operación"),
-            content=ft.Text(
-                f"Se revertirá «{snap['motivo']}» y el lote volverá a como "
-                f"estaba el {snap['creado_en'][:16].replace('T', ' ')}.\n\n"
-                "Se pierde lo que hayas cambiado a mano después."),
-            actions=[
-                ft.TextButton("Cancelar",
-                              on_click=lambda _e: self.page.pop_dialog()),
-                ft.FilledButton("Deshacer", icon=ft.Icons.UNDO,
-                                on_click=confirmar),
-            ],
-            actions_alignment=ft.MainAxisAlignment.END))
-
     def _tras_importar(self, cuantas: int) -> None:
-        """Callback del modal de carga masiva: refresca la tabla."""
+        """Callback de los modales que meten o cambian solicitudes."""
         self._recargar_solicitudes()
 
     # ------------------------------------------------------------ archivos
@@ -711,20 +1178,119 @@ class SeccionSolicitudes:
         detalle = ft.Text("", size=12, color=GRIS)
 
         def cancelar(_e=None) -> None:
+            # Detener corta la solicitud EN CURSO, no espera a que termine: se
+            # abandona antes de guardar, así que en SIPP no queda nada de ella
+            # y el último registro completo es el anterior.
             self._detener = True
-            texto.value = "Deteniendo al terminar la solicitud en curso…"
+            texto.value = "Deteniendo… la solicitud en curso no se capturará."
+            self.fila_pausa.visible = False
+            # Si estaba esperando la revisión, se le despierta para que el
+            # motor lea la orden en vez de quedarse dormido.
+            pausa.set()
             dialogo.update()
+
+        # --- Sincronización con el hilo del motor.
+        # El motor duerme en estos eventos mientras el usuario decide; nunca se
+        # toca el navegador desde aquí (la API síncrona de Playwright solo
+        # admite el hilo que lo creó, ver `rpa_sipp.procesar_lote`).
+        pausa = threading.Event()
+        cierre = threading.Event()
+        decision: dict[str, str] = {}
+
+        def decidir(que: str):
+            def _accion(_e=None) -> None:
+                decision["valor"] = que
+                self.fila_pausa.visible = False
+                texto.value = "Continuando…"
+                try:
+                    dialogo.update()
+                except Exception:  # noqa: BLE001
+                    pass
+                pausa.set()
+            return _accion
+
+        self.fila_pausa = ft.Row(
+            [boton_secundario("Aprobar y continuar", ft.Icons.PLAY_ARROW,
+                              on_click=decidir(rpa_sipp.CONTINUAR),
+                              tooltip="El robot la guarda, adjunta el Vo.Bo. "
+                                      "como documento de respaldo, la manda a "
+                                      "autorizar y sigue con la siguiente"),
+             boton_secundario("Saltar esta", ft.Icons.SKIP_NEXT,
+                              on_click=decidir(rpa_sipp.SALTAR),
+                              tooltip="No se guarda ni se autoriza: queda "
+                                      "omitida y no se reintenta en este lote"),
+             boton_secundario("Aprobar el resto sin preguntar",
+                              ft.Icons.FAST_FORWARD,
+                              on_click=decidir(rpa_sipp.NO_PAUSAR),
+                              tooltip="Termina el lote guardando y autorizando "
+                                      "sin detenerse en cada formulario")],
+            spacing=8, wrap=True, visible=False)
+
+        self.btn_cerrar_navegador = boton_primario(
+            "Cerrar el navegador", ft.Icons.CLOSE, lambda _e: cierre.set())
+        self.btn_cerrar_navegador.visible = False
 
         dialogo = ft.AlertDialog(
             modal=True,
             title=ft.Row([ft.Icon(ft.Icons.SMART_TOY, color=ft.Colors.PRIMARY),
                           ft.Text("Ejecutando el lote")], spacing=10),
-            content=ft.Column([texto, barra, detalle], spacing=12, tight=True),
+            content=ft.Column([texto, barra, detalle, self.fila_pausa],
+                              spacing=12, tight=True),
             actions=[ft.TextButton("Detener", icon=ft.Icons.STOP,
-                                   on_click=cancelar)],
+                                   on_click=cancelar),
+                     self.btn_cerrar_navegador],
             actions_alignment=ft.MainAxisAlignment.END)
         self.page.show_dialog(dialogo)
         self.page.update()
+
+        def en_pausa(datos: dict) -> str:
+            """Bloquea el hilo del motor hasta que se decida en pantalla."""
+            def mostrar() -> None:
+                nombre = getattr(datos.get("solicitud"), "beneficiario_nombre",
+                                 "")
+                texto.value = (
+                    f"Revisa el formulario de {nombre} en el navegador "
+                    f"({datos.get('i', 0)} de {datos.get('total', 0)})")
+                detalle.value = ("Quedó lleno y SIN guardar. Al aprobar, el "
+                                 "robot lo guarda, adjunta el Vo.Bo. y lo "
+                                 "manda a autorizar.")
+                self.fila_pausa.visible = True
+                try:
+                    dialogo.update()
+                except Exception:  # noqa: BLE001
+                    pass
+            decision.clear()
+            pausa.clear()
+            bucle.call_soon_threadsafe(mostrar)
+            # Sin timeout: la revisión la marca la persona. La salida de
+            # emergencia es «Detener», que el motor consulta al reanudar.
+            pausa.wait()
+            if self._detener:
+                return rpa_sipp.DETENER
+            return decision.get("valor", rpa_sipp.CONTINUAR)
+
+        def esperar_cierre() -> None:
+            """Deja el navegador abierto hasta que se pida cerrarlo."""
+            def mostrar() -> None:
+                texto.value = "Lote terminado. El navegador sigue abierto."
+                detalle.value = ("Revisa lo capturado en SIPP; ciérralo desde "
+                                 "aquí cuando termines.")
+                barra.value = 1
+                self.fila_pausa.visible = False
+                self.btn_cerrar_navegador.visible = True
+                try:
+                    dialogo.update()
+                except Exception:  # noqa: BLE001
+                    pass
+            cierre.clear()
+            bucle.call_soon_threadsafe(mostrar)
+            cierre.wait()
+
+        # Si la app se cierra con el navegador abierto, se despiertan los dos
+        # eventos: el hilo sale de su espera, cierra Playwright y termina. Sin
+        # esto quedaría un Chromium huérfano comiendo memoria.
+        self._liberar_rpa = lambda: (self._marcar_detener(), pausa.set(),
+                                     cierre.set())
 
         # El motor corre en otro hilo; tocar controles desde ahí es una carrera.
         # Se agenda cada actualización en el bucle de la interfaz.
@@ -747,18 +1313,27 @@ class SeccionSolicitudes:
                     pass
             bucle.call_soon_threadsafe(aplicar)
 
+        # La pausa solo se ofrece si alguna solicitud para en «Llenar y
+        # esperar»: en un lote que se guarda entero no hay formulario que
+        # revisar y el motor no debe detenerse a preguntar nada.
+        hay_que_revisar = any(
+            (s.parada or PARADA_DEFECTO) == "LLENADA" for s in pendientes)
         try:
             resumen = await asyncio.to_thread(
                 rpa_sipp.procesar_lote, self._lote.id, usuario, contrasena,
                 url_login=AMBIENTES[ambiente_actual()],
                 visible=navegador_visible(),
-                on_progreso=progreso, detener=lambda: self._detener)
+                on_progreso=progreso, detener=lambda: self._detener,
+                en_pausa=en_pausa if hay_que_revisar else None,
+                esperar_cierre=esperar_cierre if navegador_visible() else None)
         except Exception as exc:  # noqa: BLE001 — se reporta, la app sigue viva
+            self._liberar_rpa = None
             self.page.pop_dialog()
             self._recargar_solicitudes()
             self.app.avisar(f"El lote se interrumpió: {exc}", ROJO,
                             duracion=10000)
             return
+        self._liberar_rpa = None
 
         self.page.pop_dialog()
         self._recargar_solicitudes()
