@@ -183,3 +183,102 @@ def probar_aviso_de_caratula_no_depende_del_flag():
                          comun.pdf_falso(carpeta, "c.pdf"),
                          documentos.TIPO_CARATULA, lote.id)
     assert not documentos.falta_caratula(transferencia)
+
+
+# --------------------------------------------------------------------------- #
+#  Lectura del grid de SIPP (ng-grid virtualizado)
+# --------------------------------------------------------------------------- #
+class _GridVirtual:
+    """Imita un ng-grid: solo expone las filas de la ventana visible.
+
+    Es el comportamiento que hacía que la importación trajera siempre los
+    mismos trece conceptos: las filas de abajo NO están en el DOM hasta que se
+    baja hasta ellas.
+    """
+
+    VENTANA = 10
+
+    def __init__(self, nombres, alto_fila=20):
+        self.nombres = nombres
+        self.alto_fila = alto_fila
+        self.scroll_top = 0
+        self.client_height = self.VENTANA * alto_fila
+        self.scroll_height = len(nombres) * alto_fila
+
+    # --- lo que ve el lector como "grid"
+    def _ventana(self):
+        desde = self.scroll_top // self.alto_fila
+        return self.nombres[desde:desde + self.VENTANA]
+
+    def count(self):
+        return len(self._ventana())
+
+    def nth(self, i):
+        texto = self._ventana()[i]
+        return type("Fila", (), {
+            "locator": lambda _s, _css: type("L", (), {
+                "first": type("F", (), {"inner_text": lambda _x: texto})()})()
+        })()
+
+    # --- lo que ve como "viewport"
+    @property
+    def count_viewport(self):
+        return 1
+
+    def evaluate(self, _js):
+        antes = self.scroll_top
+        self.scroll_top = min(self.scroll_top + int(self.client_height * 0.8),
+                              max(0, self.scroll_height - self.client_height))
+        return (self.scroll_top <= antes
+                or self.scroll_top >= self.scroll_height - self.client_height - 2)
+
+
+def _sesion_falsa(grid):
+    viewport = type("V", (), {"count": lambda _s: 1,
+                              "evaluate": lambda _s, js: grid.evaluate(js)})()
+    page = type("P", (), {
+        "wait_for_timeout": lambda _s, _ms: None,
+        "locator": lambda _s, _css: type("L", (), {"first": viewport})(),
+    })()
+    return type("S", (), {"page": page})()
+
+
+class _SelectoresFalsos:
+    @staticmethod
+    def css(clave):
+        return {"con.nombre": ".ngCellText", "con.grid": "#grid"}[clave]
+
+
+def probar_se_leen_todos_los_conceptos_aunque_el_grid_use_scroll():
+    """el grid virtualizado se recorre entero, no solo la primera pantalla"""
+    # El caso reportado: SIPP tenía conceptos nuevos más abajo y la importación
+    # decía «0 nuevos» porque solo leía las filas que cabían en pantalla.
+    nombres = [f"CONCEPTO {i:02}" for i in range(1, 31)]
+    grid = _GridVirtual(nombres)
+
+    leidos = conceptos._leer_grid_con_scroll(_sesion_falsa(grid), grid,
+                                             _SelectoresFalsos)
+
+    assert len(leidos) == 30, f"solo leyó {len(leidos)} de 30"
+    assert leidos == nombres, "y en el orden del grid"
+
+
+def probar_un_grid_que_cabe_entero_se_lee_de_una():
+    """sin scroll que hacer, no se inventan vueltas"""
+    nombres = ["UNO", "DOS", "TRES"]
+    grid = _GridVirtual(nombres)
+    leidos = conceptos._leer_grid_con_scroll(_sesion_falsa(grid), grid,
+                                             _SelectoresFalsos)
+    assert leidos == nombres
+
+
+def probar_el_grid_no_repite_conceptos_al_desplazarse():
+    """las filas recicladas no entran dos veces al catálogo"""
+    # ng-grid reutiliza los mismos nodos: sin control, una fila leída en dos
+    # posiciones distintas se contaría dos veces.
+    nombres = [f"C{i}" for i in range(20)] + ["C0", "C1"]   # repetidos al final
+    grid = _GridVirtual(nombres)
+    leidos = conceptos._leer_grid_con_scroll(_sesion_falsa(grid), grid,
+                                             _SelectoresFalsos)
+    assert len(leidos) == len(set(leidos)), "hay duplicados"
+    assert len(leidos) == 20

@@ -13,12 +13,14 @@ existe pero avisa; la preparación y revisión del lote ya son plenamente usable
 from __future__ import annotations
 
 import asyncio
+import os
+import threading
 
 import flet as ft
 
-from core import asignacion, db, documentos
+from core import asignacion, conceptos as cat_conceptos, db, documentos
 from core.catalogos import (AMBIENTES, ETIQUETA_ESTADO, ETIQUETA_PARADA,
-                            PARADA_DEFECTO, PARADAS)
+                            PARADA_DEFECTO, PARADAS, TIPOS_BENEFICIARIO)
 from core.db import CONCEPTO, INSUMO, Lote, Partida, Solicitud
 from ui.alta_caratulas import AltaDesdeCaratulas
 from ui.asignacion_masiva import AsignacionMasiva
@@ -26,15 +28,37 @@ from ui.captura_solicitud import CapturaSolicitud
 from ui.carga_masiva import CargaMasiva
 from ui.comun import GRIS, NARANJA, ROJO, VERDE, color_estado, color_fila, fmt_importe
 from ui.componentes import (boton_herramienta, boton_primario, boton_secundario,
-                            campo_opciones, fila_resultado, icono_accion,
-                            tarjeta_seccion)
+                            buscador, campo_opciones, fila_resultado,
+                            icono_accion, tarjeta_seccion)
 from ui.configuracion import ambiente_actual, navegador_visible
-from ui.tabla_responsiva import (DER, IZQ, Cabecera, ColumnaTabla, FilaDatos,
+from ui.tabla_responsiva import (DER, Cabecera, ColumnaTabla, FilaDatos,
                                  SegmentoCabecera, TablaResponsiva)
 
 # Número de columnas de la tabla. Se necesita como constante para el colspan de
 # la banda de detalle, que se dibuja sin tener las columnas a la mano.
 _N_COLUMNAS = 11
+
+# Filas por página. Cada fila son once controles y el detalle desplegado suma
+# más: con un lote de doscientas, pintarlas todas manda al cliente miles de
+# controles por cada clic —marcar una casilla, desplegar un detalle— y la
+# navegación se siente trabada. Cincuenta llenan de sobra la pantalla.
+_POR_PAGINA = 50
+
+
+# Caracteres que caben en un renglón del detalle a size=11. Es una estimación:
+# la banda tiene ALTO FIJO —lo pide la tabla— así que hay que saber de antemano
+# cuánto va a ocupar el texto. Se queda corto a propósito: sobrar alto deja un
+# hueco, quedarse corto encima el texto sobre el desglose.
+_CHARS_POR_RENGLON = 140
+
+
+def _lineas_de(texto: str) -> int:
+    """Cuántos renglones ocupará un mensaje dentro de la banda de detalle."""
+    if not texto:
+        return 0
+    # Se respetan los saltos que ya trae (el validador junta varios motivos).
+    return sum(max(1, -(-len(linea) // _CHARS_POR_RENGLON))
+               for linea in texto.splitlines() or [texto])
 
 
 def _columnas(chk_todos: ft.Control) -> list[ColumnaTabla]:
@@ -49,16 +73,20 @@ def _columnas(chk_todos: ft.Control) -> list[ColumnaTabla]:
     acciones lleva piso en píxeles porque su contenido son cuatro íconos de
     tamaño fijo: por debajo de ese ancho no se encogen, se recortan.
     """
+    # Todo centrado salvo el importe: las cantidades van a la derecha para que
+    # los pesos queden bajo los pesos y se puedan comparar de un vistazo, que
+    # es justo lo que se pierde al centrarlas ($192,293.00 y $1,000,000.00
+    # centradas no comparten ni el punto decimal ni el orden de magnitud).
     return [
         ColumnaTabla("", 4, encabezado_control=chk_todos),
         ColumnaTabla("", 4),                       # desplegar detalle
-        ColumnaTabla("Estado", 9, IZQ),
-        ColumnaTabla("Beneficiario", 18, IZQ),
-        ColumnaTabla("Tipo", 8, IZQ),
-        ColumnaTabla("Empresa", 11, IZQ),
+        ColumnaTabla("Estado", 9),
+        ColumnaTabla("Beneficiario", 18),
+        ColumnaTabla("Tipo", 8),
+        ColumnaTabla("Empresa", 11),
         ColumnaTabla("Fecha", 7),
         ColumnaTabla("Importe", 10, DER),
-        ColumnaTabla("Punto de parada", 10, IZQ),
+        ColumnaTabla("Punto de parada", 10),
         ColumnaTabla("Folio SIPP", 7),
         ColumnaTabla("Acciones", 12, ancho_min_px=132),
     ]
@@ -90,6 +118,15 @@ class SeccionSolicitudes:
         self._expandidos: set[str] = set()
         self._seleccionados: set[str] = set()
         self._detener = False
+        # Despierta al hilo del motor si la app se cierra con el navegador
+        # abierto; None cuando no hay lote corriendo. Ver `_correr_lote`.
+        self._liberar_rpa = None
+        self._busqueda = ""
+        # Los tres tipos activos de entrada: el filtro sirve para acotar, no
+        # para esconder. `selected` de SegmentedButton es LISTA, no set (ver
+        # el aviso en ui/bitacora.py: un set revienta la serialización).
+        self._tipos: list[str] = list(TIPOS_BENEFICIARIO)
+        self._pagina = 0
         self.captura = CapturaSolicitud(app, self._recibir_solicitud)
         self.carga = CargaMasiva(app, self._tras_importar)
         self.alta_caratulas = AltaDesdeCaratulas(app, self._tras_importar)
@@ -187,12 +224,53 @@ class SeccionSolicitudes:
             spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER,
             visible=False)
 
+        # --- Barra de filtros: buscador por beneficiario + tipos.
+        self.tf_buscar = buscador("Buscar beneficiario…", width=320)
+        self.tf_buscar.on_change = self._cambiar_busqueda
+        self.btn_limpiar_busqueda = icono_accion(
+            ft.Icons.CLOSE, "Limpiar búsqueda", self._limpiar_busqueda,
+            color=GRIS)
+        self.btn_limpiar_busqueda.visible = False
+        self.tf_buscar.suffix = self.btn_limpiar_busqueda
+
+        # `allow_empty_selection=False`: quedarse sin ningún tipo marcado
+        # dejaría la tabla vacía sin que se vea por qué. Con los tres marcados
+        # no filtra nada, que es el estado natural.
+        self.filtro_tipos = ft.SegmentedButton(
+            selected=list(self._tipos),
+            allow_multiple_selection=True,
+            allow_empty_selection=False,
+            segments=[ft.Segment(t, label=ft.Text(t))
+                      for t in TIPOS_BENEFICIARIO],
+            on_change=self._cambiar_tipos)
+        self.txt_filtrado = ft.Text("", color=GRIS, size=12)
+
+        barra_filtros = ft.Row(
+            [ft.Row([self.tf_buscar, self.filtro_tipos, self.txt_filtrado],
+                    spacing=12, wrap=True, expand=True,
+                    vertical_alignment=ft.CrossAxisAlignment.CENTER)],
+            spacing=12, vertical_alignment=ft.CrossAxisAlignment.CENTER)
+
         # El check del encabezado se construye UNA vez y se muta: la tabla no
         # recrea su encabezado al repintar, justo para no re-parentear este
         # control (ver ui/tabla_responsiva.py).
         self.chk_todos = ft.Checkbox(
             value=False, scale=0.85, tooltip="Seleccionar todas",
             on_change=self._alternar_todos)
+
+        # --- Paginación.
+        self.btn_pag_anterior = icono_accion(
+            ft.Icons.CHEVRON_LEFT, "Página anterior",
+            lambda _e: self._mover_pagina(-1))
+        self.btn_pag_siguiente = icono_accion(
+            ft.Icons.CHEVRON_RIGHT, "Página siguiente",
+            lambda _e: self._mover_pagina(1))
+        self.txt_pagina = ft.Text("", color=GRIS, size=12)
+        self.barra_paginacion = ft.Row(
+            [ft.Container(expand=True), self.btn_pag_anterior,
+             self.txt_pagina, self.btn_pag_siguiente],
+            spacing=6, vertical_alignment=ft.CrossAxisAlignment.CENTER,
+            visible=False)
 
         self.tabla = TablaResponsiva(self.page, _columnas(self.chk_todos))
         self.vacio = ft.Container(
@@ -207,22 +285,58 @@ class SeccionSolicitudes:
                 horizontal_alignment=ft.CrossAxisAlignment.CENTER),
             alignment=ft.Alignment(0, 0), padding=40, visible=False)
 
+        # Vacío por filtro ≠ lote vacío: con un solo mensaje, buscar a alguien
+        # que no está invitaría a pensar que el lote se quedó sin solicitudes.
+        self.txt_sin_resultados = ft.Text("", color=GRIS,
+                                          text_align=ft.TextAlign.CENTER)
+        self.sin_resultados = ft.Container(
+            content=ft.Column(
+                [ft.Icon(ft.Icons.SEARCH_OFF, size=40, color=GRIS),
+                 ft.Text("Ninguna solicitud coincide con el filtro.",
+                         theme_style=ft.TextThemeStyle.BODY_LARGE),
+                 self.txt_sin_resultados,
+                 boton_secundario("Quitar los filtros", ft.Icons.FILTER_ALT_OFF,
+                                  on_click=self._quitar_filtros)],
+                spacing=8, tight=True,
+                horizontal_alignment=ft.CrossAxisAlignment.CENTER),
+            alignment=ft.Alignment(0, 0), padding=40, visible=False)
+
         self.contenido = ft.Column(
             [tarjeta_seccion(ft.Column([barra_lote, ft.Divider(),
                                         self.barra_global,
-                                        self.barra_seleccion], spacing=12,
-                                       tight=True)),
+                                        self.barra_seleccion,
+                                        ft.Divider(), barra_filtros],
+                                       spacing=12, tight=True)),
              ft.Container(
-                 content=ft.Column([self.tabla.control, self.vacio],
+                 content=ft.Column([self.tabla.control, self.vacio,
+                                    self.sin_resultados],
                                    scroll=ft.ScrollMode.AUTO, expand=True,
                                    horizontal_alignment=ft.CrossAxisAlignment.STRETCH),
-                 expand=True)],
+                 expand=True),
+             self.barra_paginacion],
             spacing=16, expand=True,
             horizontal_alignment=ft.CrossAxisAlignment.STRETCH)
 
     def _on_resize(self, _e=None) -> None:
         """La tabla se remide sola con `on_size_change`; no hay nada que
         reacomodar aquí. Presente por el contrato de pantalla del shell."""
+
+    def _marcar_detener(self) -> None:
+        self._detener = True
+
+    def cerrar_rpa(self) -> None:
+        """Suelta el navegador si quedó abierto. Lo llama el shell al salir.
+
+        Sin esto, cerrar la ventana con el navegador esperando dejaría un
+        Chromium huérfano consumiendo memoria hasta reiniciar el equipo: el
+        proceso no cuelga de la ventana de la app, sino del hilo del motor.
+        """
+        liberar = self._liberar_rpa
+        if callable(liberar):
+            try:
+                liberar()
+            except Exception:  # noqa: BLE001 — cerrando, nada debe estorbar
+                pass
 
     # -------------------------------------------------------- ambiente
     def _pintar_ambiente(self) -> None:
@@ -284,17 +398,98 @@ class SeccionSolicitudes:
         self._expandidos &= vivos
         self._pintar()
 
+    # ------------------------------------------------------------ filtros
+    def _coincide(self, s: Solicitud) -> bool:
+        """True si la solicitud pasa el buscador y el filtro de tipos.
+
+        El nombre se compara con `conceptos.normalizar`, el mismo criterio del
+        catálogo: buscar «jose muñoz» encuentra «JOSÉ MUÑOZ» sin depender de
+        acentos. Las palabras van sueltas y en cualquier orden, porque nadie
+        recuerda si el apellido iba antes o después.
+        """
+        if s.tipo_beneficiario not in self._tipos:
+            return False
+        palabras = cat_conceptos.normalizar(self._busqueda).split()
+        if not palabras:
+            return True
+        nombre = cat_conceptos.normalizar(s.beneficiario_nombre or "")
+        return all(p in nombre for p in palabras)
+
+    def _visibles(self) -> list[Solicitud]:
+        """Las solicitudes que pasan los filtros, en el orden del lote."""
+        return [s for s in self._solicitudes if self._coincide(s)]
+
+    def _filtrando(self) -> bool:
+        return bool(cat_conceptos.normalizar(self._busqueda)) or \
+            len(self._tipos) != len(TIPOS_BENEFICIARIO)
+
+    def _cambiar_busqueda(self, _e=None) -> None:
+        self._busqueda = self.tf_buscar.value or ""
+        self._pagina = 0          # filtrar y quedarse en la página 7 no tiene
+        self._pintar()            # sentido: el resultado suele caber en una
+
+    def _limpiar_busqueda(self, _e=None) -> None:
+        self.tf_buscar.value = ""
+        self._busqueda = ""
+        self._pagina = 0
+        self._pintar()
+
+    def _cambiar_tipos(self, e=None) -> None:
+        seleccion = list(getattr(e.control, "selected", None) or []) if e else []
+        self._tipos = seleccion or list(TIPOS_BENEFICIARIO)
+        self._pagina = 0
+        self._pintar()
+
+    def _quitar_filtros(self, _e=None) -> None:
+        self.tf_buscar.value = ""
+        self._busqueda = ""
+        self._tipos = list(TIPOS_BENEFICIARIO)
+        self.filtro_tipos.selected = list(TIPOS_BENEFICIARIO)
+        self._pagina = 0
+        self._pintar()
+
+    def _mover_pagina(self, delta: int) -> None:
+        self._pagina += delta
+        self._pintar()
+
     # ------------------------------------------------------------ pintado
     def _pintar(self) -> None:
+        visibles = self._visibles()
+        # La página se recorta aquí y no al cambiarla: borrar o filtrar puede
+        # dejarla fuera de rango, y una tabla vacía con filas detrás es un
+        # estado del que el usuario no sabe salir.
+        paginas = max(1, -(-len(visibles) // _POR_PAGINA))
+        self._pagina = max(0, min(self._pagina, paginas - 1))
+        desde = self._pagina * _POR_PAGINA
+        pagina = visibles[desde:desde + _POR_PAGINA]
+
         filas: list = []
-        for s in self._solicitudes:
+        for s in pagina:
             filas.append(self._fila_solicitud(s))
             if s.id in self._expandidos:
                 filas.append(self._fila_detalle(s))
         self.tabla.set_contenido(filas)
-        hay = bool(self._solicitudes)
-        self.vacio.visible = not hay
-        self.tabla.control.visible = hay
+
+        hay_lote = bool(self._solicitudes)
+        self.vacio.visible = not hay_lote
+        self.sin_resultados.visible = hay_lote and not visibles
+        self.tabla.control.visible = bool(pagina)
+        self.txt_sin_resultados.value = (
+            f"Ninguna de las {len(self._solicitudes)} solicitudes del lote "
+            f"coincide con lo que buscas.")
+
+        self.barra_paginacion.visible = paginas > 1
+        self.txt_pagina.value = (
+            f"{desde + 1}–{desde + len(pagina)} de {len(visibles)}  ·  "
+            f"página {self._pagina + 1} de {paginas}")
+        self.btn_pag_anterior.disabled = self._pagina == 0
+        self.btn_pag_siguiente.disabled = self._pagina >= paginas - 1
+
+        self.btn_limpiar_busqueda.visible = bool(self._busqueda.strip())
+        self.txt_filtrado.value = (
+            f"{len(visibles)} de {len(self._solicitudes)}"
+            if self._filtrando() else "")
+
         self._actualizar_resumen()
         self._actualizar_acciones()
         self._refrescar()
@@ -389,35 +584,72 @@ class SeccionSolicitudes:
                  spacing=2, tight=True)],
             spacing=32, vertical_alignment=ft.CrossAxisAlignment.START,
             expand=True)
+        # El motivo de «Revisar a mano» va en su propia banda, con separador e
+        # ícono: pegado al desglose se leía como un renglón más del pago, y es
+        # lo contrario —la razón por la que ese pago NO se va a capturar—.
+        lineas_error = 0
         if s.error_msg:
+            lineas_error = _lineas_de(s.error_msg)
             detalle = ft.Column(
                 [detalle,
-                 ft.Text(s.error_msg, size=11, color=ROJO)],
+                 ft.Divider(height=1),
+                 ft.Row([ft.Icon(ft.Icons.ERROR_OUTLINE, size=14, color=ROJO),
+                         ft.Text(s.error_msg, size=11, color=ROJO, expand=True)],
+                        spacing=6,
+                        vertical_alignment=ft.CrossAxisAlignment.START)],
                 spacing=6, tight=True)
 
         # Alto estimado por el bloque más largo, para que la banda no recorte.
-        renglones = max(len(conceptos), len(insumos), 2) + 1
+        # El error suma sus propios renglones: sin contarlos, un mensaje largo
+        # se dibujaba ENCIMA del desglose en vez de debajo.
+        renglones = max(len(conceptos), len(insumos), 2) + 1 + lineas_error
+        extra_error = 14 if s.error_msg else 0   # el divisor y su holgura
         return Cabecera(
             [SegmentoCabecera(2, ft.Container()),
              SegmentoCabecera(_N_COLUMNAS - 2, detalle,
                               padding=ft.Padding.symmetric(vertical=8))],
             bgcolor=ft.Colors.SURFACE_CONTAINER_LOW,
-            alto=max(64, 18 * renglones + 24))
+            alto=max(64, 18 * renglones + 24 + extra_error))
 
     def _texto_documentos(self, s: Solicitud) -> ft.Control:
-        """Qué archivos tiene la solicitud, y si le falta alguno obligatorio."""
+        """Los archivos de la solicitud, abribles con un clic.
+
+        Se abren en el visor del sistema en vez de dentro de la herramienta:
+        para comprobar que la CLABE leída es la de la carátula hace falta ver el
+        documento a tamaño real y poder acercarse, y eso ya lo hace bien el
+        visor de PDF o de imágenes que la persona usa todos los días.
+        """
         archivos = documentos.de_solicitud(s.id)
-        partes = []
+        controles: list[ft.Control] = [
+            ft.Text("Documentos:", size=11, color=GRIS)]
+
+        def enlace(etiqueta: str, ruta: str, icono) -> ft.Control:
+            return ft.Container(
+                content=ft.Row(
+                    [ft.Icon(icono, size=13, color=ft.Colors.PRIMARY),
+                     ft.Text(etiqueta, size=11, color=ft.Colors.PRIMARY,
+                             weight=ft.FontWeight.W_500)],
+                    spacing=3, tight=True),
+                padding=ft.Padding.symmetric(horizontal=6, vertical=2),
+                border_radius=4, ink=True,
+                tooltip=f"Abrir {os.path.basename(ruta)}",
+                on_click=lambda _e, r=ruta: self.app.abrir_en_sistema(r))
+
         if archivos.get("caratula"):
-            partes.append("carátula ✓")
+            controles.append(enlace("Carátula", archivos["caratula"],
+                                    ft.Icons.ACCOUNT_BALANCE))
         elif documentos.falta_caratula(s):
-            return ft.Text("Documentos: FALTA LA CARÁTULA (obligatoria para "
-                           "dar de alta la cuenta)", size=11, color=ROJO,
-                           weight=ft.FontWeight.BOLD)
+            controles.append(
+                ft.Text("FALTA LA CARÁTULA (obligatoria para dar de alta la "
+                        "cuenta)", size=11, color=ROJO,
+                        weight=ft.FontWeight.BOLD))
         if archivos.get("vobo"):
-            partes.append("Vo.Bo. ✓")
-        return ft.Text(f"Documentos: {' · '.join(partes) if partes else '—'}",
-                       size=11, color=GRIS)
+            controles.append(enlace("Vo.Bo. de compras", archivos["vobo"],
+                                    ft.Icons.FACT_CHECK))
+        if len(controles) == 1:
+            controles.append(ft.Text("—", size=11, color=GRIS))
+        return ft.Row(controles, spacing=4, tight=True, wrap=True,
+                      vertical_alignment=ft.CrossAxisAlignment.CENTER)
 
     def _actualizar_resumen(self) -> None:
         if not self._lote:
@@ -447,9 +679,10 @@ class SeccionSolicitudes:
         self.btn_ejecutar.disabled = not self._solicitudes
         # El check del encabezado refleja la selección en vez de mandarla: si
         # se marcan las filas una por una hasta completarlas todas, tiene que
-        # aparecer marcado, no seguir vacío.
-        self.chk_todos.value = bool(self._solicitudes) and n == len(
-            self._solicitudes)
+        # aparecer marcado, no seguir vacío. Se mide contra lo VISIBLE, que es
+        # sobre lo que actúa al pulsarlo.
+        visibles = {s.id for s in self._visibles()}
+        self.chk_todos.value = bool(visibles) and visibles <= self._seleccionados
         self.chk_todos.tooltip = ("Quitar la selección" if self.chk_todos.value
                                   else "Seleccionar todas")
 
@@ -475,12 +708,19 @@ class SeccionSolicitudes:
         self._refrescar()
 
     def _alternar_todos(self, e=None) -> None:
-        """Check del encabezado: marca o desmarca todo el lote de una vez."""
+        """Check del encabezado: marca o desmarca lo que el filtro deja ver.
+
+        Actúa sobre TODO lo filtrado y no solo sobre la página en pantalla: el
+        caso de uso es «filtra los Proveedores y aplícales algo», y tener que
+        marcar página por página lo volvería inútil. Lo que el filtro esconde no
+        se toca, ni para marcar ni para desmarcar.
+        """
         marcar = bool(e.control.value) if e is not None else True
+        visibles = {s.id for s in self._visibles()}
         if marcar:
-            self._seleccionados = {s.id for s in self._solicitudes}
+            self._seleccionados |= visibles
         else:
-            self._seleccionados.clear()
+            self._seleccionados -= visibles
         # Repintado completo: hay que mover el check de CADA fila, y viven en
         # controles que la tabla recrea al pintar el cuerpo.
         self._pintar()
@@ -938,20 +1178,119 @@ class SeccionSolicitudes:
         detalle = ft.Text("", size=12, color=GRIS)
 
         def cancelar(_e=None) -> None:
+            # Detener corta la solicitud EN CURSO, no espera a que termine: se
+            # abandona antes de guardar, así que en SIPP no queda nada de ella
+            # y el último registro completo es el anterior.
             self._detener = True
-            texto.value = "Deteniendo al terminar la solicitud en curso…"
+            texto.value = "Deteniendo… la solicitud en curso no se capturará."
+            self.fila_pausa.visible = False
+            # Si estaba esperando la revisión, se le despierta para que el
+            # motor lea la orden en vez de quedarse dormido.
+            pausa.set()
             dialogo.update()
+
+        # --- Sincronización con el hilo del motor.
+        # El motor duerme en estos eventos mientras el usuario decide; nunca se
+        # toca el navegador desde aquí (la API síncrona de Playwright solo
+        # admite el hilo que lo creó, ver `rpa_sipp.procesar_lote`).
+        pausa = threading.Event()
+        cierre = threading.Event()
+        decision: dict[str, str] = {}
+
+        def decidir(que: str):
+            def _accion(_e=None) -> None:
+                decision["valor"] = que
+                self.fila_pausa.visible = False
+                texto.value = "Continuando…"
+                try:
+                    dialogo.update()
+                except Exception:  # noqa: BLE001
+                    pass
+                pausa.set()
+            return _accion
+
+        self.fila_pausa = ft.Row(
+            [boton_secundario("Aprobar y continuar", ft.Icons.PLAY_ARROW,
+                              on_click=decidir(rpa_sipp.CONTINUAR),
+                              tooltip="El robot la guarda, adjunta el Vo.Bo. "
+                                      "como documento de respaldo, la manda a "
+                                      "autorizar y sigue con la siguiente"),
+             boton_secundario("Saltar esta", ft.Icons.SKIP_NEXT,
+                              on_click=decidir(rpa_sipp.SALTAR),
+                              tooltip="No se guarda ni se autoriza: queda "
+                                      "omitida y no se reintenta en este lote"),
+             boton_secundario("Aprobar el resto sin preguntar",
+                              ft.Icons.FAST_FORWARD,
+                              on_click=decidir(rpa_sipp.NO_PAUSAR),
+                              tooltip="Termina el lote guardando y autorizando "
+                                      "sin detenerse en cada formulario")],
+            spacing=8, wrap=True, visible=False)
+
+        self.btn_cerrar_navegador = boton_primario(
+            "Cerrar el navegador", ft.Icons.CLOSE, lambda _e: cierre.set())
+        self.btn_cerrar_navegador.visible = False
 
         dialogo = ft.AlertDialog(
             modal=True,
             title=ft.Row([ft.Icon(ft.Icons.SMART_TOY, color=ft.Colors.PRIMARY),
                           ft.Text("Ejecutando el lote")], spacing=10),
-            content=ft.Column([texto, barra, detalle], spacing=12, tight=True),
+            content=ft.Column([texto, barra, detalle, self.fila_pausa],
+                              spacing=12, tight=True),
             actions=[ft.TextButton("Detener", icon=ft.Icons.STOP,
-                                   on_click=cancelar)],
+                                   on_click=cancelar),
+                     self.btn_cerrar_navegador],
             actions_alignment=ft.MainAxisAlignment.END)
         self.page.show_dialog(dialogo)
         self.page.update()
+
+        def en_pausa(datos: dict) -> str:
+            """Bloquea el hilo del motor hasta que se decida en pantalla."""
+            def mostrar() -> None:
+                nombre = getattr(datos.get("solicitud"), "beneficiario_nombre",
+                                 "")
+                texto.value = (
+                    f"Revisa el formulario de {nombre} en el navegador "
+                    f"({datos.get('i', 0)} de {datos.get('total', 0)})")
+                detalle.value = ("Quedó lleno y SIN guardar. Al aprobar, el "
+                                 "robot lo guarda, adjunta el Vo.Bo. y lo "
+                                 "manda a autorizar.")
+                self.fila_pausa.visible = True
+                try:
+                    dialogo.update()
+                except Exception:  # noqa: BLE001
+                    pass
+            decision.clear()
+            pausa.clear()
+            bucle.call_soon_threadsafe(mostrar)
+            # Sin timeout: la revisión la marca la persona. La salida de
+            # emergencia es «Detener», que el motor consulta al reanudar.
+            pausa.wait()
+            if self._detener:
+                return rpa_sipp.DETENER
+            return decision.get("valor", rpa_sipp.CONTINUAR)
+
+        def esperar_cierre() -> None:
+            """Deja el navegador abierto hasta que se pida cerrarlo."""
+            def mostrar() -> None:
+                texto.value = "Lote terminado. El navegador sigue abierto."
+                detalle.value = ("Revisa lo capturado en SIPP; ciérralo desde "
+                                 "aquí cuando termines.")
+                barra.value = 1
+                self.fila_pausa.visible = False
+                self.btn_cerrar_navegador.visible = True
+                try:
+                    dialogo.update()
+                except Exception:  # noqa: BLE001
+                    pass
+            cierre.clear()
+            bucle.call_soon_threadsafe(mostrar)
+            cierre.wait()
+
+        # Si la app se cierra con el navegador abierto, se despiertan los dos
+        # eventos: el hilo sale de su espera, cierra Playwright y termina. Sin
+        # esto quedaría un Chromium huérfano comiendo memoria.
+        self._liberar_rpa = lambda: (self._marcar_detener(), pausa.set(),
+                                     cierre.set())
 
         # El motor corre en otro hilo; tocar controles desde ahí es una carrera.
         # Se agenda cada actualización en el bucle de la interfaz.
@@ -974,18 +1313,27 @@ class SeccionSolicitudes:
                     pass
             bucle.call_soon_threadsafe(aplicar)
 
+        # La pausa solo se ofrece si alguna solicitud para en «Llenar y
+        # esperar»: en un lote que se guarda entero no hay formulario que
+        # revisar y el motor no debe detenerse a preguntar nada.
+        hay_que_revisar = any(
+            (s.parada or PARADA_DEFECTO) == "LLENADA" for s in pendientes)
         try:
             resumen = await asyncio.to_thread(
                 rpa_sipp.procesar_lote, self._lote.id, usuario, contrasena,
                 url_login=AMBIENTES[ambiente_actual()],
                 visible=navegador_visible(),
-                on_progreso=progreso, detener=lambda: self._detener)
+                on_progreso=progreso, detener=lambda: self._detener,
+                en_pausa=en_pausa if hay_que_revisar else None,
+                esperar_cierre=esperar_cierre if navegador_visible() else None)
         except Exception as exc:  # noqa: BLE001 — se reporta, la app sigue viva
+            self._liberar_rpa = None
             self.page.pop_dialog()
             self._recargar_solicitudes()
             self.app.avisar(f"El lote se interrumpió: {exc}", ROJO,
                             duracion=10000)
             return
+        self._liberar_rpa = None
 
         self.page.pop_dialog()
         self._recargar_solicitudes()

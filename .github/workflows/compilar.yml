@@ -102,6 +102,7 @@ jobs:
         shell: pwsh
         run: >
           flet pack app.py -n "SolicitudesPago" -D
+          --icon "Imagenes/icon.ico"
           --add-data "Imagenes:Imagenes"
           --add-data "datos:datos"
           --hidden-import openpyxl

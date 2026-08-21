@@ -655,12 +655,40 @@ def registrar(solicitud_id: str, paso: str, mensaje: str = "",
 
 
 def listar_bitacora(solicitud_id: str | None = None,
-                    limite: int = 500) -> list[EntradaBitacora]:
+                    limite: int = 500, *,
+                    lote_id: str | None = None,
+                    desde: str | None = None,
+                    hasta: str | None = None) -> list[EntradaBitacora]:
+    """Historial, del más reciente al más antiguo.
+
+    `lote_id` filtra por el lote al que pertenece la solicitud: la bitácora
+    guarda solo `solicitud_id`, así que el lote se resuelve con una subconsulta
+    en vez de duplicar el dato en cada línea —que quedaría desincronizado si una
+    solicitud cambiara de lote—.
+
+    `desde` y `hasta` son fechas 'AAAA-MM-DD' y **ambas incluyen su día**. El
+    momento se guarda como ISO ('2026-08-17T15:03:22'), así que basta comparar
+    como texto: 'hasta' se extiende al final del día para que la fecha de hoy
+    encuentre lo de hoy.
+    """
     sql = "SELECT * FROM bitacora"
+    condiciones: list[str] = []
     args: list = []
     if solicitud_id:
-        sql += " WHERE solicitud_id = ?"
+        condiciones.append("solicitud_id = ?")
         args.append(solicitud_id)
+    if lote_id:
+        condiciones.append(
+            "solicitud_id IN (SELECT id FROM solicitud WHERE lote_id = ?)")
+        args.append(lote_id)
+    if desde:
+        condiciones.append("momento >= ?")
+        args.append(desde)
+    if hasta:
+        condiciones.append("momento <= ?")
+        args.append(f"{hasta}T23:59:59")
+    if condiciones:
+        sql += " WHERE " + " AND ".join(condiciones)
     sql += " ORDER BY id DESC LIMIT ?"
     args.append(limite)
     with conectar() as con:

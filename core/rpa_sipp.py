@@ -66,6 +66,16 @@ class Cancelado(Exception):
 # --------------------------------------------------------------------------- #
 #  Utilidades de archivos (SIPP es quisquilloso con lo que se le sube)
 # --------------------------------------------------------------------------- #
+def _mismo_texto(a: str, b: str) -> str:
+    """Compara dos textos de opción como los ve una persona.
+
+    SIPP devuelve los rótulos con espacios de sobra y a veces con la caja
+    cambiada, así que comparar en crudo daría por distinto lo que en pantalla
+    es lo mismo, y se volvería a elegir un valor que ya estaba puesto.
+    """
+    return " ".join((a or "").split()).casefold() ==         " ".join((b or "").split()).casefold()
+
+
 def _nombre_limpio(nombre_archivo: str) -> str:
     """Quita acentos, Ñ y caracteres especiales: SIPP no procesa bien esos
     nombres y la subida falla sin decir por qué."""
@@ -360,6 +370,15 @@ class SesionSipp:
         return ruta
 
     # ------------------------------------------------------- helpers de UI
+    def _valor_visible(self, select) -> str:
+        """El texto de la opción elegida en un <select>, aunque esté oculto."""
+        try:
+            return select.evaluate(
+                "el => el.selectedIndex >= 0"
+                " ? (el.options[el.selectedIndex].text || '') : ''") or ""
+        except Exception:  # noqa: BLE001 — no es un <select> o ya no está
+            return ""
+
     def seleccionar_chosen(self, clave_o_loc, texto: str, descripcion: str,
                            intentos: int = 4, dentro=None) -> None:
         """Elige una opción en un `select` "chosen" de SIPP.
@@ -380,12 +399,22 @@ class SesionSipp:
         select = (self.loc(clave_o_loc, dentro)
                   if isinstance(clave_o_loc, str) else clave_o_loc)
         select.first.wait_for(state="attached", timeout=self.timeout_ms)
-        # Espera a que la opción exista en el <select>, aunque esté oculto.
-        try:
-            select.first.locator("option", has_text=texto).first.wait_for(
-                state="attached", timeout=8000)
-        except Exception:  # noqa: BLE001 — hay listas sin <option> precargada
-            pass
+
+        # ¿Ya está elegido? Es lo más barato de comprobar y ocurre a menudo:
+        # SIPP preselecciona valores y varias listas se vuelven a pedir al
+        # recargar el formulario. Sin esto se abría el widget, se tecleaba y se
+        # clicaba para dejar el campo exactamente como estaba.
+        if _mismo_texto(self._valor_visible(select.first), texto):
+            return
+
+        # Las listas dependientes (Sucursal, Tipo de Pago, Cuentas) se llenan
+        # DESPUÉS de elegir su campo padre. Se espera a que la opción exista de
+        # verdad ANTES de abrir el widget: si se entra antes, el primer intento
+        # falla seguro y se pagan cuatro ciclos de reintento —casi treinta
+        # segundos— para acabar acertando por tiempo, no por lógica.
+        self.esperar_a(
+            lambda: select.first.locator("option", has_text=texto).count() > 0,
+            tope_ms=12000, intervalo_ms=250)
 
         contenedor = select.first.locator(
             "xpath=following-sibling::div[contains(@class,'chosen-container')][1]")
@@ -401,9 +430,12 @@ class SesionSipp:
                 buscador.press("Control+a")
                 buscador.press("Delete")
                 buscador.type(texto, delay=20)
-                self.page.wait_for_timeout(350)
                 opcion = contenedor.locator("li.active-result",
                                             has_text=texto).first
+                # Chosen filtra en `keyup`: el resultado aparece en cuanto
+                # termina de filtrar, normalmente en decenas de milisegundos.
+                self.esperar_a(lambda: opcion.count() > 0, tope_ms=6000,
+                               intervalo_ms=100)
                 opcion.wait_for(state="visible", timeout=6000)
                 opcion.click()
                 return
@@ -443,15 +475,33 @@ class SesionSipp:
         campo = loc.first
         campo.wait_for(state="visible", timeout=self.timeout_ms)
         campo.scroll_into_view_if_needed()
+        esperado = str(texto).strip()
+
+        # Primero de golpe con `fill`, que es UNA orden al navegador. Teclear
+        # carácter por carácter cuesta un viaje por letra más su `delay`, y en
+        # campos largos —o en la fecha, que dispara validación en cada tecla—
+        # se nota. Si el valor no queda (los campos con máscara ignoran `fill`
+        # o lo reformatean), se reintenta tecleando, que es como se hacía
+        # siempre. Se conserva el camino lento como red, no como norma.
+        def _quedo() -> "str | None":
+            try:
+                return (campo.input_value() or "").strip()
+            except Exception:  # noqa: BLE001 — no es un <input>
+                return None
+
         campo.fill("")
-        campo.type(str(texto), delay=15)
+        try:
+            campo.fill(str(texto))
+        except Exception:  # noqa: BLE001 — no admite fill: se teclea
+            pass
+        if _quedo() not in (None, esperado):
+            campo.fill("")
+            campo.type(str(texto), delay=15)
         campo.dispatch_event("input")
         campo.dispatch_event("change")
 
-        esperado = str(texto).strip()
-        try:
-            quedo = (campo.input_value() or "").strip()
-        except Exception:  # noqa: BLE001 — no es un <input>: no hay qué releer
+        quedo = _quedo()
+        if quedo is None:
             return
         if quedo == esperado:
             return
@@ -463,6 +513,41 @@ class SesionSipp:
                 f"{detalle}. SIPP no aceptó el valor completo; no se continúa "
                 f"para no capturar un dato incorrecto.")
         self.anotar("campo", detalle + " (SIPP filtró parte del texto)", "WARN")
+
+    def esperar_a(self, condicion, tope_ms: int, intervalo_ms: int = 150) -> bool:
+        """Sondea `condicion()` hasta que se cumpla o se agote `tope_ms`.
+
+        Sustituye a los `wait_for_timeout` fijos donde SÍ hay forma de saber que
+        el paso terminó. El tope se conserva igual que la espera fija que
+        reemplaza, así que en el peor caso se tarda lo mismo que antes; lo que
+        cambia es que en el caso normal —que es el 99%— se sigue de largo en
+        cuanto la página responde, en vez de esperar el máximo siempre.
+        """
+        vueltas = max(1, tope_ms // max(1, intervalo_ms))
+        for _ in range(vueltas):
+            try:
+                if condicion():
+                    return True
+            except Exception:  # noqa: BLE001 — la página puede estar navegando
+                pass
+            self.page.wait_for_timeout(intervalo_ms)
+        try:
+            return bool(condicion())
+        except Exception:  # noqa: BLE001
+            return False
+
+    def esperar_quieto(self, tope_ms: int) -> None:
+        """Espera a que no queden peticiones en vuelo, con tope.
+
+        SIPP hace su trabajo por AJAX: subir un archivo o cambiar de pestaña
+        dispara peticiones y la interfaz se actualiza al terminar. Esperar a que
+        la red se calme mide lo que de verdad importa —que el servidor ya
+        contestó— en vez de apostar un número de segundos.
+        """
+        try:
+            self.page.wait_for_load_state("networkidle", timeout=tope_ms)
+        except Exception:  # noqa: BLE001 — si nunca se calma, manda el tope
+            pass
 
     def cerrar_alertas(self, vueltas: int = 6) -> None:
         """Cierra los avisos emergentes de SIPP.
@@ -534,7 +619,10 @@ class SesionSipp:
                    if isinstance(clave_o_loc, str) else clave_o_loc)
         for intento in range(1, intentos + 1):
             entrada.first.set_input_files(ruta)
-            self.page.wait_for_timeout(4000)
+            # La subida es una petición AJAX: se espera a que la red se calme en
+            # vez de contar cuatro segundos siempre. Una carátula de 200 KB
+            # termina en menos de uno, y son dos documentos por solicitud.
+            self.esperar_quieto(4000)
             if not self.hay_error_sistema():
                 return
             self.anotar("subir", f"«{etiqueta}»: falló la subida "
@@ -560,7 +648,9 @@ class SesionSipp:
             loc = self.page.locator(contenedor, has_text=etiqueta)
             if loc.count() > 0:
                 loc.first.click()
-                self.page.wait_for_timeout(800)
+                # Cambiar de pestaña pide su contenido por AJAX; se espera a que
+                # llegue, no a que pasen 800 ms.
+                self.esperar_quieto(800)
                 return
         self.diagnostico(f"pestana_{nombre}")
         raise ErrorRpa(f"No apareció la pestaña «{etiqueta}» en el formulario.")
@@ -679,8 +769,21 @@ class ResultadoCaptura:
 class FlujoSolicitudPago:
     """Captura solicitudes de tipo Pago Extraordinario sobre `SesionSipp`."""
 
-    def __init__(self, sesion: SesionSipp) -> None:
+    def __init__(self, sesion: SesionSipp, cancelado=None) -> None:
         self.s = sesion
+        self._cancelado = cancelado
+
+    def abortar_si_cancelan(self) -> None:
+        """Corta la captura en curso si se pulsó «Detener».
+
+        Se llama ENTRE pasos —no a media pulsación, que no se puede—, así que
+        el corte tarda lo que tarde el paso que está corriendo, no la solicitud
+        entera. Lo que se deja a medias en SIPP es un formulario sin guardar:
+        no queda folio ni pago, y esa solicitud vuelve a su estado anterior
+        para que el siguiente lote la tome desde cero.
+        """
+        if callable(self._cancelado) and self._cancelado():
+            raise Cancelado()
 
     # ------------------------------------------------------------ helpers
     def _panel(self, tipo_beneficiario: str):
@@ -808,6 +911,7 @@ class FlujoSolicitudPago:
         s = self.s
         self.asegurar_modo_agregar()
 
+        self.abortar_si_cancelan()
         # 1) Encabezado.
         s.seleccionar_chosen("sol.empresa", solicitud.empresa, "Empresa")
         s.seleccionar_chosen("sol.sucursal", solicitud.sucursal, "Sucursal")
@@ -826,6 +930,7 @@ class FlujoSolicitudPago:
                 f"asignados para {solicitud.tipo_beneficiario}.")
         s.cerrar_alertas()
 
+        self.abortar_si_cancelan()
         # 2) Beneficiario.
         panel = self._panel(solicitud.tipo_beneficiario)
         self._resolver_beneficiario(solicitud, panel, archivos)
@@ -842,9 +947,8 @@ class FlujoSolicitudPago:
         if archivos.get("caratula"):
             s.subir_archivo("sol.pdf", archivos["caratula"], "Carátula")
 
-        # 4) Fecha, moneda y descripción.
-        if solicitud.fecha_pago:
-            s.llenar("sol.fecha_pago", solicitud.fecha_pago, "Fecha de pago")
+        self.abortar_si_cancelan()
+        # 4) Moneda y descripción. La FECHA no va aquí: ver el paso 6.
         if solicitud.moneda and s.visible_("sol.moneda"):
             try:
                 s.loc("sol.moneda").first.select_option(label=solicitud.moneda)
@@ -861,6 +965,7 @@ class FlujoSolicitudPago:
             # misma descripción para reconocer la solicitud después.
             s.llenar("sol.descripcion", deseada, "Descripción")
 
+        self.abortar_si_cancelan()
         # 5) Desglose. Cuál de los dos grids existe lo decide el tipo de
         #    beneficiario, y son excluyentes (ver core/catalogos.py): a un
         #    Proveedor se le capturan Insumos & Servicios; a un Deudor o
@@ -884,6 +989,38 @@ class FlujoSolicitudPago:
             self._llenar_insumos(renglones)
         else:
             self._llenar_conceptos(renglones)
+
+        # 6) La fecha de pago, AL FINAL y no con los demás campos de cabecera.
+        #    Elegir un concepto recarga el grid y SIPP borra la fecha por el
+        #    camino: puesta antes, se perdía y el Guardar no confirmaba nada
+        #    —«no hay folio ni aparece Solicitar Autorización»— sin decir por
+        #    qué. Es el último campo que se toca, así que ya nada la pisa.
+        self._poner_fecha(solicitud)
+
+    def _poner_fecha(self, solicitud: Solicitud) -> None:
+        """Escribe la fecha de pago y comprueba que se haya quedado.
+
+        Se relee y se reintenta una vez: el grid de conceptos vuelve a pintarse
+        de forma asíncrona y puede limpiarla justo después de escribirla. Sin
+        fecha, SIPP no guarda y el motivo no aparece por ninguna parte.
+        """
+        if not solicitud.fecha_pago:
+            return
+        s = self.s
+        for intento in (1, 2):
+            s.llenar("sol.fecha_pago", solicitud.fecha_pago, "Fecha de pago")
+            try:
+                quedo = (s.loc("sol.fecha_pago").first.input_value() or "").strip()
+            except Exception:  # noqa: BLE001 — no se pudo releer; se da por buena
+                return
+            if quedo:
+                return
+            s.anotar("fecha", f"La fecha de pago se borró tras escribirla "
+                              f"(intento {intento}/2); se reintenta", "WARN")
+            s.page.wait_for_timeout(400)
+        raise ErrorRpa(
+            "La fecha de pago no se queda escrita en el formulario. SIPP la "
+            "borra al recargar el desglose y sin ella no guarda la solicitud.")
 
     def _resolver_beneficiario(self, solicitud: Solicitud, panel,
                                archivos: dict) -> None:
@@ -1396,7 +1533,12 @@ class FlujoSolicitudPago:
         # equivocado, o no se subiría, sin que nada lo delate.
         antes = s.page.locator(selectores.css("doc.archivo")).count()
         s.loc("doc.agregar").first.click()
-        s.page.wait_for_timeout(1000)
+        # El renglón aparece en cuanto el grid se redibuja: se espera A ESO y no
+        # un segundo entero. Si no aparece, se agota el mismo tope de antes y el
+        # error que sigue es idéntico.
+        s.esperar_a(
+            lambda: s.page.locator(selectores.css("doc.archivo")).count() > antes,
+            tope_ms=1000)
         despues = s.page.locator(selectores.css("doc.archivo")).count()
         if despues <= antes:
             s.diagnostico("respaldo_sin_renglon")
@@ -1477,14 +1619,33 @@ class FlujoSolicitudPago:
                 "Ya estaba capturada en SIPP; no se duplicó.")
 
         self.llenar(solicitud, partidas, archivos)
+        # Último punto donde abandonar no deja rastro en SIPP: pasado el
+        # Guardar ya hay folio, y cortar ahí dejaría una solicitud a medias.
+        self.abortar_si_cancelan()
         if parada == "LLENADA":
             return ResultadoCaptura(
                 "LLENADA", "",
                 "Formulario lleno y sin guardar, listo para tu revisión.",
                 [self.s.captura("llenada")])
 
-        folio = self.guardar()
-        if parada == "GUARDADA":
+        return self.cerrar_solicitud(archivos, hasta=parada)
+
+    def cerrar_solicitud(self, archivos: dict[str, str] | None = None, *,
+                         hasta: str = "AUTORIZAR",
+                         folio_existente: str = "") -> ResultadoCaptura:
+        """Guarda el formulario que ya está en pantalla y, si toca, lo autoriza.
+
+        Va aparte de `capturar` porque se llega aquí por dos caminos: el normal
+        —una parada que pide guardar— y el de «Llenar y esperar», donde el
+        formulario se dejó lleno, alguien lo revisó y pidió continuar. En los
+        dos casos falta exactamente lo mismo, y duplicarlo dejaría que uno de
+        los dos se quedara sin el adjunto de respaldo o sin autorizar.
+        """
+        archivos = archivos or {}
+        # `folio_existente` llega cuando quien revisó ya pulsó Guardar en SIPP:
+        # volver a guardar abriría una segunda solicitud para el mismo pago.
+        folio = folio_existente or self.guardar()
+        if hasta == "GUARDADA":
             return ResultadoCaptura("GUARDADA", folio, "Solicitud guardada.")
 
         # Sin Vo.Bo. no tiene caso intentar: SIPP lo exige como documento de
@@ -1564,12 +1725,80 @@ def verificar_conexion(usuario: str, contrasena: str, *, url_login: str,
 # --------------------------------------------------------------------------- #
 #  Motor del lote
 # --------------------------------------------------------------------------- #
+# Qué hacer tras revisar un formulario que quedó lleno y sin guardar.
+CONTINUAR = "continuar"          # pasar a la siguiente solicitud
+SALTAR = "saltar"                # marcarla OMITIDA y pasar a la siguiente
+NO_PAUSAR = "no_pausar"          # seguir con el resto sin volver a preguntar
+DETENER = "detener"              # terminar el lote aquí
+
+
+def _cerrar_tras_revision(flujo, solicitud, docs, i, total, avisar,
+                          resumen, folio_existente: str = "") -> "ResultadoCaptura":
+    """Guarda, adjunta el Vo.Bo. y autoriza lo que acaba de revisarse.
+
+    Se ejecuta con el formulario ya lleno en pantalla, así que NO se vuelve a
+    llenar: solo falta cerrarlo. Los fallos se tratan como los del bucle —queda
+    en ERROR con su motivo y el lote sigue—, porque a estas alturas el
+    formulario existe en SIPP y abandonar en silencio dejaría a alguien creyendo
+    que ya se autorizó.
+    """
+    nombre = solicitud.beneficiario_nombre
+    try:
+        res = flujo.cerrar_solicitud(docs, hasta="AUTORIZAR",
+                                     folio_existente=folio_existente)
+        db.actualizar_estado(solicitud.id, res.estado,
+                             folio_sipp=res.folio_sipp, error_msg="")
+        db.registrar(solicitud.id, "capturar", res.mensaje)
+        avisar(i=i, total=total, nombre=nombre, estado="ok",
+               mensaje=res.mensaje)
+        return res
+    except Exception as exc:  # noqa: BLE001 — se reporta y el lote continúa
+        ruta = flujo.s.captura(f"cierre_{i}")
+        db.actualizar_estado(solicitud.id, "ERROR", error_msg=str(exc))
+        db.registrar(solicitud.id, "capturar", str(exc), "ERROR", ruta)
+        resumen["error"] += 1
+        resumen["ok"] = max(0, resumen["ok"] - 1)   # ya se contó como buena
+        resumen["detalle"].append(f"{nombre}: {exc}")
+        avisar(i=i, total=total, nombre=nombre, estado="error",
+               mensaje=str(exc))
+        return ResultadoCaptura("ERROR", "", str(exc))
+
+
+def _pausar(en_pausa, flujo, solicitud, i, total, avisar) -> "tuple[str, str]":
+    """Detiene el lote para que se revise el formulario.
+
+    Devuelve `(decisión, folio)`. El folio viene lleno solo si quien revisaba le
+    dio «Guardar» en SIPP por su cuenta: hay que saberlo para NO volver a
+    guardar después —serían dos solicitudes para el mismo pago— y para que la
+    base no siga diciendo que está sin guardar.
+    """
+    avisar(i=i, total=total, nombre=solicitud.beneficiario_nombre,
+           estado="pausado",
+           mensaje="Formulario lleno, sin guardar. Revísalo en el navegador.")
+    try:
+        decision = en_pausa({"i": i, "total": total, "solicitud": solicitud})
+    except Exception:  # noqa: BLE001 — si la interfaz falla, no se cuelga el lote
+        return CONTINUAR, ""
+
+    try:
+        folio = flujo._leer_folio()
+    except Exception:  # noqa: BLE001 — leerlo es cortesía, no puede tumbar nada
+        folio = ""
+    if folio:
+        db.actualizar_estado(solicitud.id, "GUARDADA", folio_sipp=folio,
+                             error_msg="")
+        db.registrar(solicitud.id, "capturar",
+                     f"La guardaste tú durante la revisión (folio {folio}).")
+    return decision or CONTINUAR, folio
+
+
 def procesar_lote(lote_id: str, usuario: str, contrasena: str, *,
                   url_login: str, visible: bool = True,
                   empresa_sesion: str = "Aske",
                   sucursal_sesion: str = "Corporativo",
                   documentos_por_solicitud=None,
-                  on_progreso=None, detener=None) -> dict:
+                  on_progreso=None, detener=None,
+                  en_pausa=None, esperar_cierre=None) -> dict:
     """Procesa todas las solicitudes pendientes de un lote.
 
     Una solicitud a la vez, un contexto de navegador, sin paralelismo: SIPP
@@ -1582,6 +1811,20 @@ def procesar_lote(lote_id: str, usuario: str, contrasena: str, *,
 
     Cada transición se persiste ANTES de ejecutar el paso siguiente, para que un
     corte a media captura deje la base contando la verdad.
+
+    Args:
+        en_pausa: se llama tras dejar un formulario LLENO Y SIN GUARDAR, y
+            **bloquea** hasta que quien revisa decida. Devuelve una de las
+            constantes CONTINUAR / SALTAR / NO_PAUSAR / DETENER. Sin este
+            callback el lote no se detiene, que es el comportamiento de siempre.
+        esperar_cierre: se llama al terminar, con el navegador todavía abierto,
+            y bloquea hasta que se pida cerrarlo.
+
+    **Los dos callbacks bloquean a propósito, y tienen que hacerlo aquí.** La
+    API síncrona de Playwright ata el navegador al hilo que lo creó: cerrarlo
+    —o tocarlo— desde el hilo de la interfaz revienta. Manteniendo este hilo
+    dormido en el callback, todo el trabajo sobre el navegador se queda donde
+    debe estar, y la interfaz solo despierta al hilo cuando el usuario decide.
     """
     def avisar(**kw) -> None:
         if callable(on_progreso):
@@ -1630,11 +1873,12 @@ def procesar_lote(lote_id: str, usuario: str, contrasena: str, *,
     if not partidas_de:
         return resumen
 
+    pausar = callable(en_pausa)
     with SesionSipp(url_login, visible=visible) as sesion:
         sesion.login(usuario, contrasena)
         sesion.configurar_sesion(empresa_sesion, sucursal_sesion)
         sesion.ir_a_solicitud_pago()
-        flujo = FlujoSolicitudPago(sesion)
+        flujo = FlujoSolicitudPago(sesion, cancelado=cancelado)
 
         for i, solicitud in enumerate(pendientes, 1):
             if cancelado():
@@ -1650,6 +1894,7 @@ def procesar_lote(lote_id: str, usuario: str, contrasena: str, *,
             sesion._on_bitacora = bitacora(solicitud.id)
             avisar(i=i, total=total, nombre=solicitud.beneficiario_nombre,
                    estado="procesando")
+            estado_previo = solicitud.estado
             db.actualizar_estado(solicitud.id, "EN_CAPTURA", sumar_intento=True)
             partidas = partidas_de[solicitud.id]
             # Por defecto, los archivos que el usuario ya asoció a la solicitud.
@@ -1666,6 +1911,54 @@ def procesar_lote(lote_id: str, usuario: str, contrasena: str, *,
                 resumen["ok"] += 1
                 avisar(i=i, total=total, nombre=solicitud.beneficiario_nombre,
                        estado="ok", mensaje=res.mensaje)
+                # «Llenar y esperar» significa esperar: el formulario queda en
+                # pantalla y la siguiente solicitud lo sobrescribiría, así que
+                # la revisión solo puede ocurrir AHORA.
+                if res.estado == "LLENADA" and pausar and callable(en_pausa):
+                    decision, folio_manual = _pausar(
+                        en_pausa, flujo, solicitud, i, total, avisar)
+                    if decision == SALTAR:
+                        db.actualizar_estado(solicitud.id, "OMITIDA")
+                        db.registrar(solicitud.id, "revisar",
+                                     "Saltada por quien revisó el formulario.",
+                                     "WARN")
+                    elif decision in (CONTINUAR, NO_PAUSAR):
+                        # Revisado y aprobado: el robot termina el trabajo
+                        # —guardar, adjuntar el Vo.Bo. y solicitar la
+                        # autorización— en vez de dejar el formulario lleno
+                        # para que alguien lo cierre a mano.
+                        res = _cerrar_tras_revision(flujo, solicitud, docs, i,
+                                                    total, avisar, resumen,
+                                                    folio_manual)
+                    if decision == DETENER:
+                        # Detener NO aprueba: el formulario se queda lleno y
+                        # sin guardar, así que esta solicitud no llegó a
+                        # capturarse y deja de contar. El último registro
+                        # completo es el anterior.
+                        if not folio_manual:
+                            resumen["ok"] = max(0, resumen["ok"] - 1)
+                            db.registrar(
+                                solicitud.id, "capturar",
+                                "Detenido por ti tras revisar; quedó llena y "
+                                "sin guardar.", "WARN")
+                        resumen["cancelado"] = True
+                        break
+                    if decision == NO_PAUSAR:
+                        pausar = False
+            except Cancelado:
+                # Se detuvo a media captura: el formulario queda sin guardar,
+                # así que en SIPP no hay folio ni pago. La solicitud vuelve a
+                # como estaba para que el próximo lote la tome desde cero, y NO
+                # se cuenta: el último registro completo es el anterior a este.
+                db.actualizar_estado(solicitud.id, estado_previo, error_msg="")
+                db.registrar(solicitud.id, "capturar",
+                             "Detenido por ti antes de guardar; no se capturó "
+                             "nada en SIPP.", "WARN")
+                resumen["cancelado"] = True
+                avisar(i=i, total=total, nombre=solicitud.beneficiario_nombre,
+                       estado="pausado",
+                       mensaje="Detenido: esta solicitud no se capturó.")
+                break
             except RequiereRevision as exc:
                 db.actualizar_estado(solicitud.id, "REVISAR", error_msg=str(exc))
                 db.registrar(solicitud.id, "revisar", str(exc), "WARN")
@@ -1694,4 +1987,18 @@ def procesar_lote(lote_id: str, usuario: str, contrasena: str, *,
                     flujo.volver_al_listado()
                 except Exception:  # noqa: BLE001 — el siguiente lo reintenta
                     pass
+
+        # El lote terminó pero el navegador sigue en pie: es donde quedaron los
+        # formularios llenos y los registros recién capturados, y cerrarlo aquí
+        # obligaría a volver a entrar a SIPP para comprobar cualquier cosa. Se
+        # espera EN ESTE HILO porque es el único que puede tocar Playwright.
+        if callable(esperar_cierre):
+            avisar(estado="navegador_abierto",
+                   mensaje="El navegador quedó abierto para que revises lo "
+                           "capturado. Ciérralo desde la herramienta cuando "
+                           "termines.")
+            try:
+                esperar_cierre()
+            except Exception:  # noqa: BLE001 — pase lo que pase, hay que cerrar
+                pass
     return resumen

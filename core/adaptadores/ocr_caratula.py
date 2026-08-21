@@ -480,8 +480,88 @@ def _aceptar_nombre(crudo: str) -> str:
     return limpio if limpio and _parece_nombre(limpio) else ""
 
 
-def _extraer_titular(texto: str, banco: str = "") -> str:
+def _primera_vocal_interna(palabra: str) -> str:
+    """La primera vocal DESPUÉS de la inicial, que es la 2ª letra del RFC."""
+    for letra in palabra[1:]:
+        if letra in "AEIOU":
+            return letra
+    return ""
+
+
+def _rfc_cuadra_con_nombre(nombre: str, rfc: str) -> bool:
+    """True si las 4 letras de un RFC de persona física salen de este nombre.
+
+    El RFC de persona física se arma con: inicial y primera vocal interna del
+    apellido paterno, inicial del materno e inicial del nombre de pila. No se
+    reconstruye el RFC completo —eso exigiría acertar dónde parte un nombre
+    compuesto («MARIA LUZ» / «RIVERA» / «OCAMPO»)— sino que se comprueba que cada
+    letra tenga de dónde salir, sin fijar el orden. Es tolerante a nombres y
+    apellidos compuestos, que es donde una reconstrucción exacta falla.
+    """
+    candidato = _rfc_comparable(rfc)
+    # Solo persona física: 4 letras + 6 dígitos + homoclave.
+    if not re.fullmatch(r"[A-ZÑ&]{4}\d{6}[A-Z0-9]{3}", candidato):
+        return False
+    palabras = [p for p in _comparable(nombre).upper().split()
+                if p.isalpha() and p not in _PARTICULAS and len(p) >= 2]
+    if len(palabras) < 2:
+        return False
+
+    l1, l2, l3, l4 = candidato[0], candidato[1], candidato[2], candidato[3]
+    # Se descarta POR POSICIÓN, no por valor: dos palabras iguales son el mismo
+    # objeto en Python y excluir por identidad se llevaría las dos.
+    # El apellido paterno aporta DOS letras, así que es la comprobación fuerte.
+    paterno = next((i for i, p in enumerate(palabras)
+                    if p[0] == l1 and _primera_vocal_interna(p) == l2), None)
+    if paterno is None:
+        return False
+    # Materno e inicial del nombre: cada una necesita su propia palabra, y
+    # ninguna puede ser la que ya se gastó como paterno.
+    materno = next((i for i, p in enumerate(palabras)
+                    if i != paterno and p[0] == l3), None)
+    if materno is None:
+        return False
+    return any(p[0] == l4 for i, p in enumerate(palabras)
+               if i not in (paterno, materno))
+
+
+def _titular_por_rfc(lineas: list[str], rfc: str) -> str:
+    """Busca el titular usando el RFC ya leído como prueba de identidad.
+
+    Existe porque el camino normal descarta el renglón correcto en cuanto el
+    OCR le pega texto de la columna vecina: «MARIA LUZ RIVERA OCAMPO Abe 10203040»
+    trae dígitos y `_parece_nombre` lo rechaza antes de que `_limpiar_nombre`
+    pueda recortarlo. Invertir ese orden en el camino normal es justo lo que su
+    comentario advierte que no se haga (rescataría renglones de datos), así que
+    aquí se recorta primero y se exige el RFC como evidencia a cambio.
+
+    Al recorrer en orden de documento, gana el encabezado de la página 1 —donde
+    el OCR sale más limpio— sobre sus repeticiones en las páginas siguientes.
+    """
+    if not rfc:
+        return ""
+    for linea in lineas:
+        # `_limpiar_nombre` recorta por el final, pero el OCR también pega
+        # basura por delante («3 JOSE EDUARDO…», el número de página de la
+        # columna vecina). Se podan aquí los tokens iniciales sin letras.
+        tokens = _espacios(linea).split()
+        while tokens and not any(c.isalpha() for c in tokens[0]):
+            tokens.pop(0)
+        candidato = _espacios(_limpiar_nombre(" ".join(tokens)))
+        if candidato and _rfc_cuadra_con_nombre(candidato, rfc):
+            return candidato
+    return ""
+
+
+def _extraer_titular(texto: str, banco: str = "", rfc: str = "") -> str:
     lineas = [_espacios(l) for l in texto.splitlines() if _espacios(l)]
+
+    # Cuando hay RFC de persona física, manda: es el único dato de la carátula
+    # que confirma el nombre por sí solo, sin depender de dónde lo maquetó el
+    # banco. Si no cuadra con nada, se sigue con la búsqueda por posición.
+    por_rfc = _titular_por_rfc(lineas, rfc)
+    if por_rfc:
+        return por_rfc
 
     # BBVA maqueta al titular en el renglón siguiente al número de cliente.
     if banco == "BBVA":
@@ -915,12 +995,14 @@ def interpretar(texto: str, ruta: str = "", uso_ocr: bool = False) -> DatosCarat
     datos = DatosCaratula(ruta=ruta, uso_ocr=uso_ocr)
     datos.clabe = _extraer_clabe(texto)
     datos.banco = _extraer_banco(texto, datos.clabe)
-    datos.titular = _extraer_titular(texto, datos.banco)
+    # El RFC va ANTES que el titular: cuando es de persona física sirve para
+    # confirmar cuál renglón trae el nombre (ver `_titular_por_rfc`).
     datos.rfc = _extraer_rfc(texto)
     if rfc_generico(datos.rfc):
         # Un RFC comodín no identifica a nadie: vale lo mismo que no tenerlo, y
         # dejarlo pasar lo daría de alta como si fuera el del beneficiario.
         datos.rfc = ""
+    datos.titular = _extraer_titular(texto, datos.banco, datos.rfc)
     datos.cuenta = _extraer_cuenta(texto, datos.clabe, datos.rfc)
     _recalcular_avisos(datos)
     return datos

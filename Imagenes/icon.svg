@@ -1,21 +1,36 @@
 <?xml version="1.0" encoding="utf-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 500 500">
+<!-- Icono de la Herramienta Automatizadora de Solicitudes de Pago.
+     Generado por scripts/hacer_icono.py, que produce también Imagenes/icon.ico:
+     si se edita uno a mano, dejan de coincidir. -->
+<!-- Sin width/height: solo viewBox, para que escale a cualquier tamaño
+     sin recortarse. -->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
   <defs>
-    <linearGradient gradientUnits="userSpaceOnUse" x1="367.491" y1="-233.828" x2="367.491" y2="-117.638" id="gradient-1" gradientTransform="matrix(0.91992, -0.392106, 0.119816, 0.281101, -17.09899, 406.958872)">
-      <stop offset="0" style="stop-color: rgb(255, 255, 255);"/>
-      <stop offset="1" style="stop-color: rgb(168, 196, 217);"/>
+    <linearGradient id="fondo" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1a237e"/>
+      <stop offset="1" stop-color="#000666"/>
     </linearGradient>
-    <linearGradient gradientUnits="userSpaceOnUse" x1="361.989" y1="-29.657" x2="361.989" y2="159.167" id="gradient-0" gradientTransform="matrix(0.911623, -0.411027, 0.229688, 0.50943, -11.13039, 358.8892)">
-      <stop offset="0" style="stop-color: rgb(230, 180, 65);"/>
-      <stop offset="1" style="stop-color: rgb(193, 140, 36);"/>
+    <linearGradient id="moneda" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#e6b441"/>
+      <stop offset="1" stop-color="#c18c24"/>
     </linearGradient>
-    <mask id="arrow-cutout" maskUnits="userSpaceOnUse" x="0" y="0" width="500" height="500">
-      <rect x="0" width="500" height="500" fill="white" y="0"/>
-      <path fill="black" stroke="black" stroke-width="15" stroke-linejoin="miter" stroke-linecap="round" d="M 155.626 303.151 L 223.092 231.937 L 242.367 252.819 L 286.809 206.771 L 278.777 198.74 L 314.652 187.496 L 308.762 226.047 L 298.589 218.551 L 242.903 276.379 L 220.95 254.961 L 175.437 303.686 C 175.437 303.686 154.555 303.151 155.626 303.151 Z"/>
-    </mask>
   </defs>
-  <g style="" transform="matrix(2.310016, 0, 0, 2.296092, -289.497131, -268.724762)">
-    <path mask="url(#arrow-cutout)" style="fill: url(&quot;#gradient-0&quot;); stroke: none; stroke-width: 0px;" d="M 229.352 133.961 C 229.352 133.961 218.108 166.088 192.942 199.821 C 167.776 233.554 164.564 247.475 165.099 265.68 C 165.634 283.885 184.91 317.618 227.21 322.437 C 269.51 327.256 293.605 279.601 293.069 263.538 C 292.533 247.475 286.109 220.703 261.478 192.86 C 236.847 165.017 229.352 133.426 229.352 133.961 Z"/>
-    <path style="fill: url(&quot;#gradient-1&quot;); stroke: none; stroke-width: 0px; stroke-linecap: round;" d="M 155.626 303.151 L 223.092 231.937 L 242.367 252.819 L 286.809 206.771 L 278.777 198.74 L 314.652 187.496 L 308.762 226.047 L 298.589 218.551 L 242.903 276.379 L 220.95 254.961 L 175.437 303.686 C 175.437 303.686 154.555 303.151 155.626 303.151 Z"/>
-  </g>
+
+  <rect x="0" y="0" width="1024" height="1024" rx="225" fill="url(#fondo)"/>
+
+  <!-- Hoja de la solicitud, con el pico doblado -->
+  <path fill="#ffffff"
+        d="M 266 184 L 624 184 L 757 317 L 757 757 L 266 757 Z"/>
+  <path fill="#d6dbeb"
+        d="M 624 184 L 757 317 L 624 317 Z"/>
+
+  <!-- Renglones -->
+  <rect x="337" y="306" width="333" height="28" rx="14" fill="#7880a0"/>
+  <rect x="337" y="408" width="333" height="28" rx="14" fill="#7880a0"/>
+  <rect x="337" y="510" width="196" height="28" rx="14" fill="#7880a0"/>
+
+  <!-- Moneda, con su reborde para despegarla de la hoja -->
+  <circle cx="716" cy="716" r="237" fill="#000666"/>
+  <circle cx="716" cy="716" r="215" fill="url(#moneda)"/>
+  <path fill="#000666" transform="translate(624.43 823.13) scale(0.15186 -0.15186)" d="M674 8V-209H528V2Q325 3 150 94V371Q208 324 323.0 284.0Q438 244 528 238V602Q294 689 208.5 790.5Q123 892 123 1038Q123 1195 234.0 1305.5Q345 1416 528 1434V1620H674V1438Q885 1428 989 1370V1100Q849 1185 674 1204V825Q893 746 988.0 644.5Q1083 543 1083 399Q1083 233 977.0 131.5Q871 30 674 8ZM528 883V1200Q389 1175 389 1055Q389 952 528 883ZM674 545V242Q817 264 817 385Q817 483 674 545Z"/>
 </svg>

@@ -487,9 +487,200 @@ def probar_alta_desde_caratulas():
     assert con_caratula == 3, "ninguna solicitud debe quedarse sin carátula"
 
 
+def _pantalla_con(solicitudes: list[tuple[str, str]]):
+    """Pantalla de solicitudes con un lote lleno de (nombre, tipo)."""
+    from ui.solicitudes import SeccionSolicitudes
+
+    app = comun.AppFalsa()
+    pantalla = SeccionSolicitudes(app)
+    pantalla.cargar_desde_db()
+    for nombre, tipo in solicitudes:
+        comun.solicitud(pantalla._lote.id, nombre, tipo=tipo)
+    pantalla._recargar_solicitudes()
+    return pantalla
+
+
+def probar_el_buscador_del_listado_filtra_por_beneficiario():
+    """se busca sin acentos, por palabras sueltas y en cualquier orden"""
+    pantalla = _pantalla_con([
+        ("JOSÉ MUÑOZ ÁVILA", "Acreedor"),
+        ("ANA LOPEZ RUIZ", "Acreedor"),
+        ("PEDRO GOMEZ SOTO", "Deudor"),
+    ])
+    assert len(pantalla._visibles()) == 3
+
+    # Sin acentos y en minúsculas.
+    pantalla.tf_buscar.value = "munoz"
+    pantalla._cambiar_busqueda()
+    assert [s.beneficiario_nombre for s in pantalla._visibles()] == [
+        "JOSÉ MUÑOZ ÁVILA"]
+
+    # Palabras sueltas y en cualquier orden: nadie recuerda si el apellido iba
+    # antes o después.
+    pantalla.tf_buscar.value = "ruiz ana"
+    pantalla._cambiar_busqueda()
+    assert [s.beneficiario_nombre for s in pantalla._visibles()] == [
+        "ANA LOPEZ RUIZ"]
+
+    pantalla._limpiar_busqueda()
+    assert len(pantalla._visibles()) == 3
+
+
+def probar_el_filtro_de_tipo_admite_uno_dos_o_los_tres():
+    """el filtro de tipo de beneficiario combina cualquier subconjunto"""
+    from core.catalogos import TIPOS_BENEFICIARIO
+
+    pantalla = _pantalla_con([
+        ("UNO PROVEEDOR", "Proveedor"),
+        ("DOS DEUDOR", "Deudor"),
+        ("TRES ACREEDOR", "Acreedor"),
+    ])
+
+    class _E:
+        def __init__(self, seleccion):
+            self.control = type("C", (), {"selected": seleccion})()
+
+    # Uno solo.
+    pantalla._cambiar_tipos(_E(["Proveedor"]))
+    assert [s.tipo_beneficiario for s in pantalla._visibles()] == ["Proveedor"]
+
+    # Combinación de dos.
+    pantalla._cambiar_tipos(_E(["Proveedor", "Acreedor"]))
+    assert sorted(s.tipo_beneficiario for s in pantalla._visibles()) == [
+        "Acreedor", "Proveedor"]
+
+    # Los tres.
+    pantalla._cambiar_tipos(_E(list(TIPOS_BENEFICIARIO)))
+    assert len(pantalla._visibles()) == 3
+
+
+def probar_el_listado_se_pagina_y_seleccionar_todas_respeta_el_filtro():
+    """con muchas filas se pagina, y «todas» marca lo filtrado, no el lote"""
+    from ui.solicitudes import _POR_PAGINA
+
+    filas = [(f"BENEFICIARIO {i:03}", "Acreedor" if i % 2 else "Proveedor")
+             for i in range(_POR_PAGINA + 20)]
+    pantalla = _pantalla_con(filas)
+
+    # La primera página no trae más de lo permitido y la barra aparece.
+    pantalla._pintar()
+    assert pantalla.barra_paginacion.visible
+    assert pantalla.btn_pag_anterior.disabled
+    assert not pantalla.btn_pag_siguiente.disabled
+
+    pantalla._mover_pagina(1)
+    assert pantalla._pagina == 1
+    assert not pantalla.btn_pag_anterior.disabled
+    # Pasada la última no se puede seguir: la página se recorta al pintar.
+    pantalla._mover_pagina(50)
+    assert pantalla.btn_pag_siguiente.disabled
+
+    # «Seleccionar todas» actúa sobre lo FILTRADO, no sobre el lote entero, y
+    # tampoco solo sobre la página que se está viendo.
+    class _E:
+        def __init__(self, seleccion):
+            self.control = type("C", (), {"selected": seleccion})()
+
+    pantalla._cambiar_tipos(_E(["Proveedor"]))
+    visibles = {s.id for s in pantalla._visibles()}
+    assert 0 < len(visibles) < len(pantalla._solicitudes)
+
+    pantalla._alternar_todos(type("E", (), {"control": type(
+        "C", (), {"value": True})()})())
+    assert pantalla._seleccionados == visibles, "no debe tocar lo que el filtro esconde"
+
+
+def probar_la_fecha_comun_se_aplica_a_todas_las_caratulas():
+    """la fecha de pago del paso 2 llena las solicitudes que no la traen"""
+    # La carátula no trae fecha de pago —no es un dato del banco—, así que sin
+    # esto un lote entero queda con «Falta la fecha de pago» y hay que corregir
+    # solicitud por solicitud.
+    from ui.alta_caratulas import AltaDesdeCaratulas
+
+    carpeta = comun.carpeta_temporal()
+    for nombre in ("CARATULA JUAN PEREZ LOPEZ.pdf",
+                   "CARATULA MARIA RUIZ SOTO.pdf"):
+        comun.pdf_falso(carpeta, nombre)
+
+    app = comun.AppFalsa()
+    modal = AltaDesdeCaratulas(app, lambda *_a: None)
+    modal.abrir(comun.lote().id)
+    comun.correr(modal._cargar([carpeta]))
+    assert modal._borradores, "no se cargó ninguna carátula"
+    assert all(not b.solicitud.fecha_pago for b in modal._borradores)
+
+    modal.campo_fecha.value = "30/09/2026"
+    modal._aplicar_comunes()
+    assert all(b.solicitud.fecha_pago == "30/09/2026"
+               for b in modal._borradores), "no se aplicó a todas"
+
+    # Y no pisa la que ya venía puesta: ahí manda lo que trajo el Excel.
+    modal._borradores[0].solicitud.fecha_pago = "15/10/2026"
+    modal.campo_fecha.value = "01/12/2026"
+    modal._aplicar_comunes()
+    assert modal._borradores[0].solicitud.fecha_pago == "15/10/2026"
+
+
 # --------------------------------------------------------------------------- #
 #  Modal de asignación masiva
 # --------------------------------------------------------------------------- #
+def probar_el_centro_de_costos_solo_se_pide_cuando_hay_insumos():
+    """un concepto de pago no lleva centro de costos; un insumo sí"""
+    # Pedirlo con un alcance de puros Acreedores sería pedir un dato que no se
+    # escribe en ningún lado: el renglón de concepto no tiene esos campos.
+    from ui.asignacion_masiva import AsignacionMasiva
+
+    conceptos.importar(["VIGILANCIA"], "Abastecedora")
+    app = comun.AppFalsa()
+    modal = AsignacionMasiva(app, lambda *_a: None)
+
+    solo_acreedores = comun.lote()
+    comun.solicitud(solo_acreedores.id, "ANA LOPEZ", tipo="Acreedor")
+    modal.abrir(solo_acreedores.id, set())
+    assert not modal.bloque_insumo.visible, "no hay proveedores que lo necesiten"
+
+    con_proveedor = comun.lote()
+    comun.solicitud(con_proveedor.id, "ANA LOPEZ", tipo="Acreedor")
+    comun.solicitud(con_proveedor.id, "PROVEEDOR SA", tipo="Proveedor")
+    modal.abrir(con_proveedor.id, set())
+    assert modal.bloque_insumo.visible, "con proveedores sí hacen falta"
+
+    # Y no deja calcular sin ellos: el renglón de insumo iría incompleto a SIPP.
+    modal.dd_nombre.value = "VIGILANCIA"
+    modal.tf_centro.value = ""
+    modal.tf_cuenta.value = ""
+    modal._calcular()
+    assert modal._plan is None, "debió detenerse y pedir los datos del insumo"
+
+    modal.tf_centro.value = "CC-01"
+    modal.tf_cuenta.value = "5000"
+    modal._calcular()
+    assert modal._plan is not None, "con los datos completos sí procede"
+
+
+def probar_la_asignacion_masiva_reasigna_la_cabecera_sin_concepto():
+    """se puede fijar empresa, sucursal y fecha sin elegir concepto"""
+    from ui.asignacion_masiva import AsignacionMasiva
+
+    app = comun.AppFalsa()
+    modal = AsignacionMasiva(app, lambda *_a: None)
+    lote = comun.lote()
+    comun.solicitud(lote.id, "ANA LOPEZ", tipo="Acreedor")
+    modal.abrir(lote.id, set())
+
+    # Sin concepto y sin cabecera no hay nada que hacer.
+    modal.dd_nombre.value = ""
+    modal._calcular()
+    assert modal._plan is None
+
+    modal.campo_fecha.value = "30/09/2026"
+    modal._calcular()
+    assert modal._plan is not None and modal._plan.cambios
+    modal._aplicar()
+    assert all(s.fecha_pago == "30/09/2026"
+               for s in db.listar_solicitudes(lote.id))
+
+
 def probar_asignacion_invalida_la_previa_al_cambiar_criterios():
     """cambiar un criterio obliga a recalcular"""
     # Si no, se aplicaría un plan distinto del que se vio, que es exactamente lo
@@ -525,11 +716,19 @@ def probar_asignacion_respeta_la_seleccion_previa():
     comun.solicitud(lote.id, "OTRO", partidas=[
         comun.insumo("Facturado", 500.0, origen="CFDI")])
 
+    # El alcance ya no se elige en el modal: lo dice la selección con la que se
+    # abrió, y se enuncia para que se vea a cuántas va a aplicar.
     modal.abrir(lote.id, {s.id})
-    assert modal.dd_alcance.value == "Solo las seleccionadas"
+    assert modal._alcance() == asignacion.SELECCIONADAS
+    assert "1 solicitud(es) que seleccionaste" in modal.txt_alcance.value
     modal.dd_nombre.value = "VIGILANCIA"
     modal._calcular()
     assert [c.solicitud.id for c in modal._plan.cambios] == [s.id]
+
+    # Sin selección previa, el alcance es el lote entero y se advierte.
+    modal.abrir(lote.id, set())
+    assert modal._alcance() == asignacion.TODAS
+    assert "TODAS" in modal.txt_alcance.value
 
 
 def probar_asignacion_deja_aplicar_aunque_falte_otro_campo():
@@ -601,6 +800,154 @@ def probar_bitacora_filtra_por_nivel():
     assert "2 registro" in pantalla.txt_resumen.value
     pantalla._nivel = "ERROR"
     pantalla.cargar_desde_db()
+    assert "1 registro" in pantalla.txt_resumen.value
+
+
+def probar_bitacora_filtra_por_lote():
+    """se puede mirar el historial de un lote sin el ruido de los demás"""
+    from ui.bitacora import SeccionBitacora
+
+    uno = comun.lote("Lote uno")
+    otro = comun.lote("Lote dos")
+    a = comun.solicitud(uno.id, "ANA LOPEZ")
+    b = comun.solicitud(otro.id, "BRUNO DIAZ")
+    db.registrar(a.id, "login", "Sesión iniciada")
+    db.registrar(a.id, "guardar", "Guardada")
+    db.registrar(b.id, "login", "Sesión iniciada")
+
+    app = comun.AppFalsa()
+    pantalla = SeccionBitacora(app)
+    pantalla.cargar_desde_db()
+    assert "3 registro" in pantalla.txt_resumen.value
+
+    pantalla._lote_id = uno.id
+    pantalla.cargar_desde_db()
+    assert "2 registro" in pantalla.txt_resumen.value, pantalla.txt_resumen.value
+    assert "1 solicitud" in pantalla.txt_resumen.value
+
+
+def probar_bitacora_filtra_por_fecha():
+    """el rango de fechas acota, y el día de «hasta» se incluye"""
+    # El momento se guarda con hora ('2026-08-17T15:03'), así que un «hasta»
+    # comparado en crudo dejaría fuera todo lo de ese mismo día.
+    from ui.bitacora import SeccionBitacora
+
+    lote = comun.lote()
+    s = comun.solicitud(lote.id, "ANA LOPEZ")
+    db.registrar(s.id, "login", "Sesión iniciada")
+
+    hoy = db._ahora()[:10]
+    assert len(db.listar_bitacora(desde=hoy, hasta=hoy)) == 1, (
+        "el registro de hoy tiene que entrar en un rango que termina hoy")
+    assert not db.listar_bitacora(desde="2000-01-01", hasta="2000-01-02")
+
+    app = comun.AppFalsa()
+    pantalla = SeccionBitacora(app)
+    pantalla.campo_desde.value = "01/01/2000"
+    pantalla.campo_hasta.value = "02/01/2000"
+    pantalla.cargar_desde_db()
+    assert "0 registro" in pantalla.txt_resumen.value
+    assert pantalla.sin_resultados.visible, "hay que distinguirlo de vacía"
+    assert not pantalla.vacio.visible
+
+
+def probar_bitacora_agrupa_los_pasos_por_solicitud():
+    """cada solicitud abre su propio bloque, en vez de una lista corrida"""
+    from ui.bitacora import SeccionBitacora
+    from ui.tabla_responsiva import Cabecera
+
+    lote = comun.lote()
+    a = comun.solicitud(lote.id, "ANA LOPEZ")
+    b = comun.solicitud(lote.id, "BRUNO DIAZ")
+    db.registrar(a.id, "login", "Sesión iniciada")
+    db.registrar(a.id, "guardar", "Falló", nivel="ERROR")
+    db.registrar(b.id, "login", "Sesión iniciada")
+
+    app = comun.AppFalsa()
+    pantalla = SeccionBitacora(app)
+    pantalla.cargar_desde_db()
+
+    # Dos solicitudes -> dos bandas de grupo, siempre visibles.
+    cabeceras = [f for f in pantalla.tabla._filas if isinstance(f, Cabecera)]
+    assert len(cabeceras) == 2, f"{len(cabeceras)} bandas"
+    assert "2 solicitud(es)" in pantalla.txt_resumen.value
+    assert "1 error(es)" in pantalla.txt_resumen.value
+
+    # El bloque con error se abre solo (sus 2 pasos se ven); el otro no.
+    assert a.id in pantalla._expandidos
+    assert b.id not in pantalla._expandidos
+    assert len(pantalla.tabla._filas) == 4, "2 bandas + los 2 pasos del fallido"
+
+
+def probar_los_bloques_de_la_bitacora_se_despliegan_y_se_recuerdan():
+    """cada solicitud se abre y se cierra, y el refresco no lo deshace"""
+    from ui.bitacora import SeccionBitacora
+    from ui.tabla_responsiva import Cabecera
+
+    lote = comun.lote()
+    s = comun.solicitud(lote.id, "ANA LOPEZ")
+    db.registrar(s.id, "login", "Sesión iniciada")
+    db.registrar(s.id, "guardar", "Guardada")
+
+    app = comun.AppFalsa()
+    pantalla = SeccionBitacora(app)
+    pantalla.cargar_desde_db()
+    # Sin errores, arranca cerrado: solo se ve su banda.
+    assert len(pantalla.tabla._filas) == 1
+    assert s.id not in pantalla._expandidos
+
+    pantalla._alternar_bloque(s.id)
+    assert len(pantalla.tabla._filas) == 3, "banda + sus dos pasos"
+
+    # Un refresco NO debe cerrar lo que el usuario abrió.
+    pantalla.cargar_desde_db()
+    assert s.id in pantalla._expandidos
+    assert len(pantalla.tabla._filas) == 3
+
+    pantalla._todos_los_bloques(False)
+    assert len(pantalla.tabla._filas) == 1
+    pantalla._todos_los_bloques(True)
+    assert len(pantalla.tabla._filas) == 3
+
+
+def probar_un_bloque_con_error_cerrado_a_mano_no_se_reabre():
+    """si lo cierras, se queda cerrado aunque tenga errores"""
+    # Se abren solos la PRIMERA vez que aparecen; después manda el usuario.
+    from ui.bitacora import SeccionBitacora
+
+    lote = comun.lote()
+    s = comun.solicitud(lote.id, "ANA LOPEZ")
+    db.registrar(s.id, "guardar", "Falló", nivel="ERROR")
+
+    app = comun.AppFalsa()
+    pantalla = SeccionBitacora(app)
+    pantalla.cargar_desde_db()
+    assert s.id in pantalla._expandidos, "el que falla se abre solo"
+
+    pantalla._alternar_bloque(s.id)
+    pantalla.cargar_desde_db()
+    assert s.id not in pantalla._expandidos, "no debe reabrirse en el refresco"
+
+
+def probar_quitar_filtros_devuelve_la_bitacora_completa():
+    """el botón de limpiar deja los cuatro filtros en su sitio"""
+    from ui.bitacora import SeccionBitacora
+
+    lote = comun.lote()
+    s = comun.solicitud(lote.id, "ANA LOPEZ")
+    db.registrar(s.id, "login", "Sesión iniciada")
+
+    app = comun.AppFalsa()
+    pantalla = SeccionBitacora(app)
+    pantalla._nivel = "ERROR"
+    pantalla._lote_id = lote.id
+    pantalla.campo_desde.value = "01/01/2000"
+    pantalla.campo_hasta.value = "02/01/2000"
+    pantalla.cargar_desde_db()
+    assert "0 registro" in pantalla.txt_resumen.value
+
+    pantalla._quitar_filtros()
+    assert not pantalla._hay_filtros()
     assert "1 registro" in pantalla.txt_resumen.value
 
 

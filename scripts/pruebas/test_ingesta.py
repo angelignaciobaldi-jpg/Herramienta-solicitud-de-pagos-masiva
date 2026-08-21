@@ -7,6 +7,7 @@ Cada una de esas pérdidas manda dinero a otro lado o registra mal a una persona
 
 from __future__ import annotations
 
+import csv
 import os
 
 from openpyxl import Workbook, load_workbook
@@ -30,6 +31,34 @@ def _fila(**valores) -> list:
     desconocidos = set(valores) - set(_CAMPOS)
     assert not desconocidos, f"campos que no existen: {desconocidos}"
     return [valores.get(c, "") for c in _CAMPOS]
+
+
+def _csv_lleno(filas: list[list], *, delimitador: str = ",",
+               codec: str = "utf-8") -> str:
+    """Escribe un CSV con los encabezados del contrato y las filas dadas."""
+    carpeta = comun.carpeta_temporal()
+    ruta = os.path.join(carpeta, "solicitudes.csv")
+    with open(ruta, "w", encoding=codec, newline="") as fh:
+        escritor = csv.writer(fh, delimiter=delimitador)
+        escritor.writerow([c.etiqueta for c in plantilla_excel.CAMPOS])
+        for fila in filas:
+            escritor.writerow(fila)
+    return ruta
+
+
+def _fila_completa(**extra) -> list:
+    """Fila válida de referencia; `extra` sobrescribe lo que interese probar."""
+    datos = dict(
+        empresa="Abastecedora", sucursal="Corporativo",
+        tipo_beneficiario="Acreedor", beneficiario_nombre="JUAN PEREZ LOPEZ",
+        beneficiario_rfc="XAXX010101000", beneficiario_correo="j@x.invalid",
+        forma_pago="Transferencia", tipo_gasto="No Deducible",
+        cuenta_banco="BBVA", cuenta_clabe="012345678901234568",
+        fecha_pago="15/09/2026", moneda="Pesos (MXN)",
+        descripcion="Finiquito", concepto_nombre="PAGO PTU",
+        importe="12500.00")
+    datos.update(extra)
+    return _fila(**datos)
 
 
 def _plantilla_llena(filas: list[list], partidas: list[list] | None = None):
@@ -501,6 +530,229 @@ def probar_no_se_devuelve_el_rfc_del_banco():
     datos = ocr_caratula.interpretar(texto)
     assert datos.rfc == "", f"se coló el RFC del banco: {datos.rfc}"
     assert datos.titular == "JUAN PEREZ LOPEZ"
+
+
+def probar_un_csv_se_lee_igual_que_la_plantilla_de_excel():
+    """un .csv entra por el mismo camino y sale la misma solicitud"""
+    # La ingesta del área llega en los dos formatos: hay quien exporta de su
+    # sistema a CSV y hay quien llena la plantilla. Tienen que dar lo mismo.
+    ruta = _csv_lleno([_fila_completa()])
+    imp = adaptador.leer(ruta, "lote-csv")
+    assert not imp.error, imp.error
+    assert len(imp.filas) == 1
+    fila = imp.filas[0]
+    assert fila.valida, fila.resumen_problemas
+    assert fila.solicitud.beneficiario_nombre == "JUAN PEREZ LOPEZ"
+    assert fila.solicitud.cuenta_clabe == "012345678901234568"
+    assert fila.solicitud.importe_total == 12500.00
+
+
+def probar_el_csv_separado_por_punto_y_coma_tambien_se_lee():
+    """Excel en español guarda con ';' y ese archivo también tiene que abrir"""
+    # Con Windows en español la coma es el separador decimal, así que Excel
+    # exporta con punto y coma. Es el CSV que más va a llegar aquí.
+    ruta = _csv_lleno([_fila_completa()], delimitador=";")
+    imp = adaptador.leer(ruta, "lote-csv")
+    assert not imp.error, imp.error
+    assert len(imp.filas) == 1, "no se detectó el separador ';'"
+    assert imp.filas[0].solicitud.beneficiario_nombre == "JUAN PEREZ LOPEZ"
+
+
+def probar_el_csv_no_pierde_los_ceros_de_la_clabe():
+    """la CLABE llega completa: en CSV es texto y no se corrompe como en Excel"""
+    # En .xlsx una CLABE en celda numérica pierde los ceros de la izquierda.
+    # El CSV no tiene ese problema y la prueba lo fija como garantía.
+    ruta = _csv_lleno([_fila_completa(cuenta_clabe="002730905273576666")])
+    imp = adaptador.leer(ruta, "lote-csv")
+    assert not imp.error, imp.error
+    clabe = imp.filas[0].solicitud.cuenta_clabe
+    assert clabe == "002730905273576666", clabe
+    assert len(clabe) == 18
+
+
+def probar_el_csv_de_windows_conserva_los_acentos():
+    """un CSV en cp1252 no registra al beneficiario con el nombre roto"""
+    # Excel guarda el CSV en la codificación de Windows, no en UTF-8. Leerlo
+    # como UTF-8 rompería «MUÑOZ» y así quedaría en SIPP para siempre.
+    ruta = _csv_lleno([_fila_completa(beneficiario_nombre="JOSÉ MUÑOZ ÁVILA")],
+                      codec="cp1252")
+    imp = adaptador.leer(ruta, "lote-csv")
+    assert not imp.error, imp.error
+    nombre = imp.filas[0].solicitud.beneficiario_nombre
+    assert nombre == "JOSÉ MUÑOZ ÁVILA", nombre
+
+
+def probar_se_encuentran_los_enlaces_pegados_como_texto_y_como_hipervinculo():
+    """los documentos enlazados se detectan en sus dos formas"""
+    # En un caso real de 194 enlaces, UNO era hipervínculo de celda y 193
+    # estaban pegados como texto: mirar solo `cell.hyperlink` habría encontrado
+    # uno de cada doscientos.
+    carpeta = comun.carpeta_temporal()
+    ruta = os.path.join(carpeta, "enlaces.xlsx")
+    libro = Workbook()
+    hoja = libro.active
+    hoja.title = plantilla_excel.HOJA_SOLICITUDES
+    hoja["A1"] = "Beneficiario"
+    hoja["B1"] = "Documento"
+    hoja["A2"] = "JUAN PEREZ LOPEZ"
+    hoja["B2"] = "https://ejemplo.invalid/caratula-1.pdf"     # texto pegado
+    hoja["A3"] = "MARIA RUIZ SOTO"
+    hoja["B3"] = "Ver documento"                              # hipervínculo
+    hoja["B3"].hyperlink = "https://ejemplo.invalid/caratula-2.pdf"
+    hoja["A4"] = "SIN DOCUMENTO"
+    libro.save(ruta)
+    libro.close()
+
+    enlaces = adaptador.enlaces_por_fila(ruta)
+    assert enlaces == {2: "https://ejemplo.invalid/caratula-1.pdf",
+                       3: "https://ejemplo.invalid/caratula-2.pdf"}, enlaces
+    assert 4 not in enlaces, "una fila sin enlace no debe inventar uno"
+
+
+def probar_se_baja_la_columna_de_caratulas_y_no_la_del_otro_documento():
+    """con varios documentos por fila se elige la carátula por su encabezado"""
+    # Un formulario real pide cuatro archivos por solicitud —boleta, acta,
+    # censo y carátula—, todos con enlace. Tomar «el primero de la fila» baja
+    # la boleta: 212 documentos escolares en vez de 212 carátulas.
+    carpeta = comun.carpeta_temporal()
+    ruta = os.path.join(carpeta, "formulario.xlsx")
+    libro = Workbook()
+    hoja = libro.active
+    hoja.title = plantilla_excel.HOJA_SOLICITUDES
+    # Los títulos NO van en la primera fila, como en los export de formularios.
+    hoja["A1"] = "Datos de la solicitud"
+    hoja["A3"] = "Nombre y apellido del solicitante"
+    hoja["B3"] = "Por favor carga en PDF la boleta del niño beneficiado"
+    hoja["C3"] = "Por favor carga en PDF caratula de estado de cuenta bancario"
+    hoja["A4"] = "JUAN PEREZ LOPEZ"
+    hoja["B4"] = "https://ejemplo.invalid/boleta.pdf"
+    hoja["C4"] = "https://ejemplo.invalid/caratula.pdf"
+    libro.save(ruta)
+    libro.close()
+
+    columnas = adaptador.columnas_con_enlaces(ruta)
+    assert len(columnas) == 2, columnas
+    letras = {c["letra"] for c in columnas}
+    assert letras == {"B", "C"}, letras
+
+    elegida = adaptador.columna_de_caratulas(columnas)
+    assert elegida == 3, f"debió elegir la columna C, eligió {elegida}"
+
+    enlaces = adaptador.enlaces_por_fila(ruta)
+    assert enlaces == {4: "https://ejemplo.invalid/caratula.pdf"}, enlaces
+
+
+def probar_sin_pista_de_caratula_no_se_adivina_la_columna():
+    """si ningún encabezado dice carátula, se cae al primer enlace de la fila"""
+    carpeta = comun.carpeta_temporal()
+    ruta = os.path.join(carpeta, "sin_pistas.xlsx")
+    libro = Workbook()
+    hoja = libro.active
+    hoja.title = plantilla_excel.HOJA_SOLICITUDES
+    hoja["A1"] = "Beneficiario"
+    hoja["B1"] = "Documento"
+    hoja["A2"] = "JUAN PEREZ LOPEZ"
+    hoja["B2"] = "https://ejemplo.invalid/doc.pdf"
+    libro.save(ruta)
+    libro.close()
+
+    assert adaptador.columna_de_caratulas(
+        adaptador.columnas_con_enlaces(ruta)) is None
+    assert adaptador.enlaces_por_fila(ruta) == {
+        2: "https://ejemplo.invalid/doc.pdf"}
+
+
+def probar_un_enlace_caducado_lo_dice_en_vez_de_fallar_en_la_red():
+    """el enlace vencido se explica: hay que volver a exportar el archivo"""
+    # Los documentos se sirven con URL firmadas y temporales. Vencidas, el
+    # servidor responde 403 y «prohibido» manda a buscar un problema de
+    # permisos que no existe.
+    import datetime as dt
+
+    from core import descargas
+
+    ayer = int((dt.datetime.now() - dt.timedelta(days=1)).timestamp())
+    url = f"https://ejemplo.invalid/caratula.pdf?token=abc&expires={ayer}"
+    assert descargas.caducidad(url) is not None
+
+    carpeta = comun.carpeta_temporal()
+    try:
+        descargas.descargar(url, carpeta)
+        assert False, "debió rechazarlo sin salir a la red"
+    except descargas.DescargaFallida as exc:
+        assert "caducó" in str(exc), str(exc)
+        assert "exportar" in str(exc), "no dice qué hacer para arreglarlo"
+
+
+def probar_no_se_descarga_de_direcciones_que_no_son_web():
+    """solo http(s): la URL sale de un archivo que la herramienta no controla"""
+    from core import descargas
+
+    carpeta = comun.carpeta_temporal()
+    for url in ("file:///C:/Windows/System32/config/SAM", "ftp://x.invalid/a",
+                "javascript:alert(1)", ""):
+        try:
+            descargas.descargar(url, carpeta)
+            assert False, f"debió rechazar {url!r}"
+        except descargas.DescargaFallida:
+            pass
+
+
+def probar_el_nombre_que_propone_el_servidor_no_se_sale_de_la_carpeta():
+    """un Content-Disposition con «../» no escribe fuera del destino"""
+    from core import descargas
+
+    assert descargas._sanear("../../evil.pdf") == "evil.pdf"
+    assert descargas._sanear(r"C:\Windows\system32\evil.pdf") == "evil.pdf"
+    assert "/" not in descargas._sanear("a/b/c.pdf")
+    # Y el nombre que sale de la URL pasa por el mismo saneado.
+    assert descargas.nombre_de_url(
+        "https://x.invalid/a/b/caratula%20juan.pdf") == "caratula juan.pdf"
+
+
+def probar_el_rfc_rescata_al_titular_que_el_ocr_ensucio():
+    """con RFC de persona física el titular sale, aunque el OCR le pegue basura"""
+    # Caso real de un estado de cuenta BBVA: el nombre va en el bloque de
+    # dirección, a dos columnas, y el OCR le arrastra texto del vecino. Sin el
+    # RFC, `_parece_nombre` descarta ese renglón por traer dígitos y el titular
+    # termina siendo la plaza de la sucursal.
+    texto = (
+        "BBVA\n"
+        "Estado de Cuenta\n"
+        "MARIA LUZ RIVERA OCAMPO Abe 10203040\n"
+        "OBRERA No. Cuenta CLABE RIOM800315AB1\n"
+        "PLAZA: MEX BN\n"
+        "CLABE: 012345678901234568\n")
+    datos = ocr_caratula.interpretar(texto)
+    assert datos.rfc == "RIOM800315AB1", datos.rfc
+    assert datos.titular == "MARIA LUZ RIVERA OCAMPO", datos.titular
+
+
+def probar_el_rfc_no_inventa_un_titular_que_no_cuadra():
+    """si ninguna línea cuadra con el RFC, no se fuerza: manda la vía normal"""
+    # El rescate por RFC solo puede AÑADIR aciertos. Cuando el RFC es de persona
+    # moral o no corresponde al nombre, tiene que quedarse callado en vez de
+    # devolver el primer renglón que se le parezca.
+    texto = (
+        "HSBC MEXICO\n"
+        "Titular: TRANSPORTES Y EQUIPOS ASAMAZ SA DE CV\n"
+        "R.F.C. IOFG200106314\n"
+        "CLABE: 021345678901234563\n")
+    datos = ocr_caratula.interpretar(texto)
+    assert datos.titular == "TRANSPORTES Y EQUIPOS ASAMAZ SA DE CV", datos.titular
+
+
+def probar_se_poda_la_basura_pegada_delante_del_titular():
+    """el número de columna que el OCR pega al frente no se va en el nombre"""
+    # Salía «3 JUAN CARLOS AGUILAR MENDOZA» y ese nombre se registraría así
+    # en SIPP, donde queda para siempre en el catálogo de beneficiarios.
+    texto = (
+        "Citibanamex\n"
+        "3 JUAN CARLOS AGUILAR MENDOZA\n"
+        "RFC AUMJ750620XY2\n"
+        "CLABE: 002345678901234564\n")
+    datos = ocr_caratula.interpretar(texto)
+    assert datos.titular == "JUAN CARLOS AGUILAR MENDOZA", datos.titular
 
 
 def probar_el_titular_de_la_caratula_manda_sobre_el_nombre_del_archivo():

@@ -27,17 +27,19 @@ from __future__ import annotations
 
 import asyncio
 import os
+import tempfile
 
 import flet as ft
 
-from core import catalogos, db, documentos, ocr
+from core import catalogos, db, descargas, documentos, ocr
 from core.adaptadores import caratulas
 from core.adaptadores import excel as adaptador_excel
 from core.adaptadores import ocr_caratula
 from core.empresas import NOMBRES_EMPRESAS
 from ui.comun import GRIS, NARANJA, ROJO, VERDE, fmt_importe
-from ui.componentes import (Modal, boton_primario, boton_secundario,
-                            campo_opciones, campo_tabla_texto, tarjeta_seccion)
+from ui.componentes import (CampoFecha, Modal, boton_primario,
+                            boton_secundario, campo_opciones,
+                            campo_tabla_texto, tarjeta_seccion)
 from ui.tabla_responsiva import (DER, IZQ, ColumnaTabla, FilaDatos,
                                  TablaResponsiva)
 
@@ -76,6 +78,9 @@ class AltaDesdeCaratulas:
         self.btn_carpeta = boton_secundario(
             "Elegir carpeta…", ft.Icons.FOLDER_OPEN,
             on_click=self._elegir_carpeta)
+        self.btn_enlaces = boton_secundario(
+            "Desde archivo con enlaces…", ft.Icons.LINK,
+            on_click=self._elegir_enlaces)
         self.btn_detener = boton_secundario(
             "Detener", ft.Icons.STOP, on_click=self._detener_lectura)
         self.btn_detener.visible = False
@@ -89,10 +94,11 @@ class AltaDesdeCaratulas:
             ft.Text("Cada archivo se convierte en una solicitud, con su "
                     "carátula ya adjunta. Se lee la CLABE y el titular de cada "
                     "una: el titular es el beneficiario, y la CLABE es con lo "
-                    "que después se empareja el Excel.",
+                    "que después se empareja el Excel. Si tus carátulas están "
+                    "en enlaces dentro de un Excel o CSV, se descargan solas.",
                     theme_style=ft.TextThemeStyle.BODY_MEDIUM, color=GRIS),
-            ft.Row([self.btn_archivos, self.btn_carpeta, self.btn_detener,
-                    self.txt_archivos],
+            ft.Row([self.btn_archivos, self.btn_carpeta, self.btn_enlaces,
+                    self.btn_detener, self.txt_archivos],
                    spacing=12, vertical_alignment=ft.CrossAxisAlignment.CENTER,
                    wrap=True),
             self.barra_lectura,
@@ -108,6 +114,12 @@ class AltaDesdeCaratulas:
         bl_tipo, self.dd_tipo = campo_opciones(
             "Tipo de beneficiario", catalogos.TIPOS_BENEFICIARIO, width=220,
             valor="Acreedor", on_change=self._aplicar_comunes)
+        # La carátula NO trae fecha de pago —no es un dato del banco, es una
+        # decisión de quien paga—, así que sin Excel las 47 solicitudes de un
+        # lote saldrían todas con «Falta la fecha de pago». Ponerla aquí una
+        # vez evita corregirlas una por una.
+        self.campo_fecha = CampoFecha(self.page, "Fecha de pago",
+                                      on_change=self._aplicar_comunes)
         paso2 = tarjeta_seccion(ft.Column([
             ft.Row([ft.Icon(ft.Icons.TUNE, color=ft.Colors.PRIMARY_CONTAINER),
                     ft.Text("2. Datos comunes a todas",
@@ -117,25 +129,31 @@ class AltaDesdeCaratulas:
             ft.Text("Se aplican a las solicitudes que no traigan ese dato del "
                     "Excel.", theme_style=ft.TextThemeStyle.BODY_MEDIUM,
                     color=GRIS),
-            ft.Row([bl_empresa, bl_sucursal, bl_tipo], spacing=16, wrap=True),
+            ft.Row([bl_empresa, bl_sucursal, bl_tipo,
+                    ft.Container(self.campo_fecha.control, width=200)],
+                   spacing=16, wrap=True),
         ], spacing=10, tight=True))
 
-        # Paso 3 — Excel.
-        self.txt_excel = ft.Text("Sin Excel: tendrás que completar importe, "
-                                 "fecha y concepto a mano.", color=GRIS)
-        self.btn_excel = boton_secundario("Elegir Excel…", ft.Icons.UPLOAD_FILE,
+        # Paso 3 — Excel o CSV.
+        self.txt_excel = ft.Text("Sin archivo: tendrás que completar a mano lo "
+                                 "que la carátula no trae.", color=GRIS)
+        self.btn_excel = boton_secundario("Elegir Excel o CSV…",
+                                          ft.Icons.UPLOAD_FILE,
                                           on_click=self._elegir_excel)
         paso3 = tarjeta_seccion(ft.Column([
             ft.Row([ft.Icon(ft.Icons.TABLE_VIEW,
                             color=ft.Colors.PRIMARY_CONTAINER),
-                    ft.Text("3. Completa con el Excel (opcional)",
+                    ft.Text("3. Completa con el Excel o CSV (opcional)",
                             theme_style=ft.TextThemeStyle.LABEL_LARGE,
                             color=ft.Colors.PRIMARY_CONTAINER)],
                    spacing=8, tight=True),
             ft.Text("Sus filas se emparejan con las carátulas por CLABE, y por "
-                    "nombre las que no tengan CLABE de los dos lados. Ni el "
-                    "beneficiario ni la cuenta se sobrescriben: manda la "
-                    "carátula, que es la que acredita a quién se le paga.",
+                    "nombre las que no tengan CLABE de los dos lados. Completa "
+                    "empresa, sucursal, tipo de beneficiario, RFC, correo, "
+                    "banco, forma de pago, tipo de gasto, fecha, moneda, "
+                    "descripción e importe. Ni el beneficiario ni la cuenta se "
+                    "sobrescriben: manda la carátula, que es la que acredita a "
+                    "quién se le paga.",
                     theme_style=ft.TextThemeStyle.BODY_MEDIUM, color=GRIS),
             ft.Row([self.btn_excel, self.txt_excel],
                    spacing=12, vertical_alignment=ft.CrossAxisAlignment.CENTER),
@@ -143,7 +161,8 @@ class AltaDesdeCaratulas:
 
         # Vista previa.
         self.txt_resumen = ft.Text("", theme_style=ft.TextThemeStyle.BODY_LARGE)
-        self.tabla = TablaResponsiva(self.page, _COLUMNAS, ancho_inicial=1000)
+        self.tabla = TablaResponsiva(self.page, _COLUMNAS, ancho_inicial=1000,
+                                     alto_cuerpo=250)
         self.previa = ft.Column(
             [ft.Row([ft.Icon(ft.Icons.FACT_CHECK,
                              color=ft.Colors.PRIMARY_CONTAINER),
@@ -152,7 +171,7 @@ class AltaDesdeCaratulas:
                              color=ft.Colors.PRIMARY_CONTAINER)],
                     spacing=8, tight=True),
              self.txt_resumen,
-             ft.Container(self.tabla.control, height=250)],
+             self.tabla.control],
             spacing=10, tight=True, visible=False,
             horizontal_alignment=ft.CrossAxisAlignment.STRETCH)
 
@@ -179,9 +198,10 @@ class AltaDesdeCaratulas:
         self._modo_lectura(False)
         self.txt_archivos.value = "Ninguna carátula elegida."
         self.txt_archivos.color = GRIS
-        self.txt_excel.value = ("Sin Excel: tendrás que completar importe, "
-                                "fecha y concepto a mano.")
+        self.txt_excel.value = ("Sin archivo: tendrás que completar a mano lo "
+                                "que la carátula no trae.")
         self.txt_excel.color = GRIS
+        self.campo_fecha.value = ""
         self.previa.visible = False
         self.btn_importar.disabled = True
         self.btn_importar.text = "Dar de alta"
@@ -215,6 +235,114 @@ class AltaDesdeCaratulas:
             return
         await self._cargar([carpeta])
 
+    async def _elegir_enlaces(self, _e=None) -> None:
+        """Carátulas que llegan como enlaces dentro de una hoja de cálculo.
+
+        Se bajan a una carpeta temporal y a partir de ahí el flujo es el mismo
+        que si se hubieran elegido a mano: leer, revisar, dar de alta.
+        """
+        if self._leyendo:
+            return
+        seleccion = await self.app.picker.pick_files(
+            dialog_title="Elige el archivo con los enlaces a las carátulas",
+            allowed_extensions=["xlsx", "xlsm", "csv"], allow_multiple=False)
+        if not seleccion:
+            return
+        ruta = seleccion[0].path
+
+        self._detener = False
+        self._modo_lectura(True)
+        self.txt_archivos.value = "Buscando enlaces en el archivo…"
+        self.txt_archivos.color = GRIS
+        self.barra_lectura.value = None
+        self.modal.refrescar()
+
+        try:
+            columnas = await asyncio.to_thread(
+                adaptador_excel.columnas_con_enlaces, ruta)
+            elegida = adaptador_excel.columna_de_caratulas(columnas)
+            enlaces = await asyncio.to_thread(
+                adaptador_excel.enlaces_por_fila, ruta, columna=elegida)
+            nombres = await asyncio.to_thread(
+                adaptador_excel.nombres_por_fila, ruta)
+        except Exception as exc:  # noqa: BLE001 — se reporta, el modal sigue
+            self._modo_lectura(False)
+            self.txt_archivos.value = f"No se pudo leer el archivo: {exc}"
+            self.txt_archivos.color = ROJO
+            self.modal.refrescar()
+            return
+
+        if not enlaces:
+            self._modo_lectura(False)
+            self.txt_archivos.value = (
+                "El archivo no trae enlaces a documentos. Deben ser "
+                "direcciones http(s), como hipervínculo o escritas en la celda.")
+            self.txt_archivos.color = NARANJA
+            self.modal.refrescar()
+            return
+
+        # Un formulario puede pedir varios documentos por solicitud (boleta,
+        # acta, carátula). Se dice de cuál columna se está bajando: si se eligió
+        # la equivocada, el usuario tiene que poder notarlo ANTES de esperar
+        # doscientas descargas y encontrarse con actas de nacimiento.
+        if len(columnas) > 1:
+            cual = next((c for c in columnas if c["indice"] == elegida), None)
+            if cual:
+                self.app.avisar(
+                    f"El archivo trae {len(columnas)} columnas con documentos; "
+                    f"se usará «{cual['encabezado'][:60]}…» (columna "
+                    f"{cual['letra']}).", VERDE, duracion=6000)
+            else:
+                self.app.avisar(
+                    f"El archivo trae {len(columnas)} columnas con documentos y "
+                    f"ninguna dice ser la carátula: se tomará la primera de cada "
+                    f"fila. Revisa los resultados.", NARANJA, duracion=8000)
+
+        bucle = asyncio.get_running_loop()
+
+        def progreso(hechos: int, total: int, _url: str) -> None:
+            def aplicar() -> None:
+                self.barra_lectura.value = hechos / total if total else None
+                self.txt_archivos.value = f"Descargando {hechos} de {total}…"
+                self.modal.refrescar()
+            bucle.call_soon_threadsafe(aplicar)
+
+        carpeta = tempfile.mkdtemp(prefix="caratulas_enlaces_")
+        try:
+            rutas, errores = await asyncio.to_thread(
+                descargas.descargar_varios, list(enlaces.items()), carpeta,
+                nombres=nombres, on_progreso=progreso,
+                cancelado=lambda: self._detener)
+        except Exception as exc:  # noqa: BLE001
+            self._modo_lectura(False)
+            self.txt_archivos.value = f"No se pudieron descargar: {exc}"
+            self.txt_archivos.color = ROJO
+            self.modal.refrescar()
+            return
+        finally:
+            self._modo_lectura(False)
+
+        self._errores_descarga = errores
+        if not rutas:
+            # Todos fallaron: el primer error explica por qué mejor que un
+            # recuento, y el más común —enlaces caducados— se arregla volviendo
+            # a exportar el archivo.
+            detalle = errores[0].split(": ", 1)[-1] if errores else ""
+            self.txt_archivos.value = (
+                f"No se pudo descargar ninguno de los {len(enlaces)} enlaces. "
+                f"{detalle}")
+            self.txt_archivos.color = ROJO
+            self.previa.visible = False
+            self.btn_importar.disabled = True
+            self.modal.refrescar()
+            return
+
+        await self._cargar([carpeta])
+        if errores:
+            self.app.avisar(
+                f"{len(errores)} enlace(s) no se pudieron descargar; se "
+                f"cargaron {len(rutas)}. Revisa el archivo de origen.", NARANJA)
+
     def _detener_lectura(self, _e=None) -> None:
         self._detener = True
         self.txt_archivos.value = "Deteniendo al terminar la carátula en curso…"
@@ -225,6 +353,7 @@ class AltaDesdeCaratulas:
         self._leyendo = activo
         self.btn_archivos.disabled = activo
         self.btn_carpeta.disabled = activo
+        self.btn_enlaces.disabled = activo
         self.btn_excel.disabled = activo
         self.btn_detener.visible = activo
         self.barra_lectura.visible = activo
@@ -279,6 +408,11 @@ class AltaDesdeCaratulas:
             self.modal.refrescar()
             return
 
+        # La fecha común no la conoce `crear_borradores` (no es un dato de la
+        # carátula), así que se vuelca aquí sobre lo recién leído. Si no, habría
+        # que volver a tocar el campo para que surtiera efecto.
+        if self.campo_fecha.value:
+            self._aplicar_comunes()
         self.txt_archivos.value = self._resumen_lectura()
         self._pintar()
         self.modal.refrescar()
@@ -320,6 +454,10 @@ class AltaDesdeCaratulas:
                 b.solicitud.sucursal = self.dd_sucursal.value
             if self.dd_tipo.value:
                 b.solicitud.tipo_beneficiario = self.dd_tipo.value
+            # Como empresa y sucursal: solo rellena lo vacío, para no pisar la
+            # fecha que ya hubiera traído el Excel ni la corregida a mano.
+            if self.campo_fecha.value and not b.solicitud.fecha_pago:
+                b.solicitud.fecha_pago = self.campo_fecha.value
         if self._borradores:
             self._pintar()
         self.modal.refrescar()
@@ -330,8 +468,8 @@ class AltaDesdeCaratulas:
             self.app.avisar("Primero elige las carátulas.", NARANJA)
             return
         seleccion = await self.app.picker.pick_files(
-            dialog_title="Elige el Excel con los datos",
-            allowed_extensions=["xlsx", "xlsm"], allow_multiple=False)
+            dialog_title="Elige el Excel o CSV con los datos",
+            allowed_extensions=["xlsx", "xlsm", "csv"], allow_multiple=False)
         if not seleccion:
             return
         ruta = seleccion[0].path

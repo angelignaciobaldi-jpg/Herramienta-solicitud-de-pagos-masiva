@@ -22,8 +22,9 @@ from __future__ import annotations
 import flet as ft
 
 from core import asignacion, catalogos, conceptos, db
-from ui.comun import GRIS, NARANJA, ROJO, VERDE, fmt_importe, parse_importe
-from ui.componentes import (Modal, boton_primario, boton_secundario,
+from core.empresas import NOMBRES_EMPRESAS
+from ui.comun import GRIS, NARANJA, ROJO, VERDE, fmt_importe
+from ui.componentes import (CampoFecha, Modal, boton_primario, boton_secundario,
                             campo_opciones, campo_texto, tarjeta_seccion)
 from ui.tabla_responsiva import (DER, IZQ, ColumnaTabla, FilaDatos,
                                  TablaResponsiva)
@@ -37,20 +38,9 @@ _COLUMNAS = [
     ColumnaTabla("Detalle", 30, IZQ),
 ]
 
-_ALCANCES = {
-    "Todas las del lote": asignacion.TODAS,
-    "Solo las seleccionadas": asignacion.SELECCIONADAS,
-    "Solo las que no tienen desglose": asignacion.SIN_PARTIDAS,
-}
 _MODOS = {
     "Agregar como renglón adicional": asignacion.AGREGAR,
     "Reemplazar los renglones existentes": asignacion.REEMPLAZAR,
-}
-_IMPORTES = {
-    "Tomar el total de la solicitud": asignacion.TOTAL_SOLICITUD,
-    "Distribuir el total entre los renglones": asignacion.DISTRIBUIR,
-    "Un importe fijo para todas": asignacion.IMPORTE_FIJO,
-    "Dejar en blanco (se llena a mano)": asignacion.EN_BLANCO,
 }
 
 
@@ -68,16 +58,18 @@ class AsignacionMasiva:
         self._lote_id = ""
         self._seleccionadas: set[str] = set()
         self._plan: asignacion.Plan | None = None
+        self._hay_insumos = False
         self._construir()
 
     # ------------------------------------------------------------ UI
     def _construir(self) -> None:
-        bl_alcance, self.dd_alcance = campo_opciones(
-            "Alcance", list(_ALCANCES), valor="Todas las del lote",
-            on_change=self._invalidar)
         bl_modo, self.dd_modo = campo_opciones(
             "Qué hacer con lo que ya tienen", list(_MODOS),
             valor="Agregar como renglón adicional", on_change=self._invalidar)
+        # A quién se aplica no se elige: lo dice la selección con la que se
+        # abrió el modal (ver `abrir`). Un selector aparte permitía abrir con
+        # filas marcadas y aplicar a todo el lote sin querer.
+        self.txt_alcance = ft.Text("", size=12, color=GRIS)
 
         catalogo = conceptos.nombres()
         self.dd_nombre = ft.Dropdown(
@@ -90,18 +82,34 @@ class AsignacionMasiva:
 
         bl_cc, self.tf_centro = campo_texto(
             "Centro de costos", flotante=True,
-            hint="Solo aplica a los renglones de insumo")
+            hint="Obligatorio para insumos")
         bl_cta, self.tf_cuenta = campo_texto(
             "Cuenta contable", flotante=True,
-            hint="Solo aplica a los renglones de insumo")
+            hint="Obligatorio para insumos")
+        # Centro de costos y cuenta contable son campos del renglón de INSUMO,
+        # que solo le toca a un Proveedor. Con un alcance sin proveedores no
+        # tienen dónde escribirse, así que se esconden en vez de quedarse ahí
+        # pidiendo datos que nadie va a usar.
+        self.bloque_insumo = ft.Row([bl_cc, bl_cta], spacing=16, visible=False)
+        self.txt_insumo = ft.Text(
+            "", size=12, color=NARANJA, visible=False)
 
-        bl_importe, self.dd_importe = campo_opciones(
-            "Importe del renglón", list(_IMPORTES),
-            valor="Tomar el total de la solicitud", on_change=self._cambio_importe)
-        bl_fijo, self.tf_fijo = campo_texto(
-            "Importe fijo", flotante=True, hint="0.00")
-        self.bloque_fijo = bl_fijo
-        self.bloque_fijo.visible = False
+        # --- Datos de la solicitud (cabecera), no del desglose.
+        bl_empresa, self.dd_empresa = campo_opciones(
+            "Empresa", NOMBRES_EMPRESAS, width=250, on_change=self._invalidar)
+        bl_sucursal, self.dd_sucursal = campo_opciones(
+            "Sucursal", catalogos.SUCURSALES, width=210,
+            on_change=self._invalidar)
+        self.campo_fecha = CampoFecha(self.page, "Fecha de pago",
+                                      on_change=self._invalidar)
+
+        # El importe NO se fija aquí: cada solicitud lleva el suyo y no hay un
+        # criterio común que sirva para el lote. El renglón nace en cero y se
+        # captura después; la solicitud queda marcada como incompleta hasta
+        # entonces, y el motor no la captura así.
+        self.txt_importe = ft.Text(
+            "El importe de cada renglón se captura después, uno por uno: aquí "
+            "solo se deja asignado el concepto.", size=12, color=GRIS)
 
         formulario = tarjeta_seccion(ft.Column([
             ft.Row([ft.Icon(ft.Icons.PLAYLIST_ADD_CHECK,
@@ -110,13 +118,25 @@ class AsignacionMasiva:
                             theme_style=ft.TextThemeStyle.LABEL_LARGE,
                             color=ft.Colors.PRIMARY_CONTAINER)],
                    spacing=8, tight=True),
-            ft.Row([bl_alcance, bl_modo], spacing=16),
+            self.txt_alcance,
+            ft.Row([bl_modo], spacing=16),
             self.dd_nombre,
             ft.Text("A un Proveedor le corresponde un insumo; a un Deudor o "
                     "Acreedor, un concepto de pago. La herramienta lo decide "
                     "por cada solicitud.", size=12, color=GRIS),
-            ft.Row([bl_cc, bl_cta], spacing=16),
-            ft.Row([bl_importe, self.bloque_fijo], spacing=16),
+            self.txt_insumo,
+            self.bloque_insumo,
+            self.txt_importe,
+            ft.Divider(),
+            ft.Text("Datos de la solicitud (opcional)",
+                    theme_style=ft.TextThemeStyle.LABEL_LARGE,
+                    color=ft.Colors.PRIMARY_CONTAINER),
+            ft.Text("Lo que llenes aquí SUSTITUYE lo que tengan las solicitudes "
+                    "del alcance. Déjalo vacío para no tocarlo.",
+                    size=12, color=GRIS),
+            ft.Row([bl_empresa, bl_sucursal,
+                    ft.Container(self.campo_fecha.control, width=200)],
+                   spacing=16, wrap=True),
         ], spacing=14, tight=True))
 
         # Vista previa.
@@ -160,10 +180,54 @@ class AsignacionMasiva:
         self.previa.visible = False
         self.btn_aplicar.disabled = True
         self.btn_aplicar.text = "Aplicar"
-        # Si el usuario venía de seleccionar filas, se respeta esa intención.
-        self.dd_alcance.value = ("Solo las seleccionadas" if seleccionadas
-                                 else "Todas las del lote")
+        # Se dice a cuántas va a aplicar, en vez de ofrecer elegirlo: la
+        # decisión ya se tomó al marcar (o no marcar) filas en la tabla.
+        self.txt_alcance.value = (
+            f"Se aplicará a las {len(seleccionadas)} solicitud(es) que "
+            f"seleccionaste." if seleccionadas
+            else "Se aplicará a TODAS las solicitudes del lote. Para acotarlo, "
+                 "cierra y marca antes las filas que quieras.")
+        # Los datos de cabecera arrancan vacíos SIEMPRE: son sobrescritura, y
+        # heredar el valor de la vez pasada volvería a pisar el lote sin que
+        # nadie lo haya pedido esta vez.
+        self.dd_empresa.value = None
+        self.dd_sucursal.value = None
+        self.campo_fecha.value = ""
+        self._refrescar_campos_insumo()
         self.modal.abrir()
+
+    def _alcance(self) -> str:
+        """A quién se aplica: lo que venía seleccionado o, si no había, el lote."""
+        return (asignacion.SELECCIONADAS if self._seleccionadas
+                else asignacion.TODAS)
+
+    def _alcanzadas(self) -> list:
+        """Las solicitudes que se tocarían, para saber qué campos pedir."""
+        if not self._lote_id:
+            return []
+        todas = db.listar_solicitudes(self._lote_id)
+        if self._alcance() == asignacion.SELECCIONADAS:
+            return [s for s in todas if s.id in self._seleccionadas]
+        return todas
+
+    def _refrescar_campos_insumo(self) -> None:
+        """Muestra centro de costos y cuenta contable solo si hay insumos.
+
+        Un concepto de pago no los lleva, así que con un alcance de puros
+        Acreedores o Deudores pedirlos sería pedir datos que no se escriben en
+        ningún lado. Con proveedores dentro sí son obligatorios: el renglón de
+        insumo va a SIPP con esos dos campos.
+        """
+        proveedores = [s for s in self._alcanzadas()
+                       if catalogos.clase_desglose(s.tipo_beneficiario) == db.INSUMO]
+        self._hay_insumos = bool(proveedores)
+        self.bloque_insumo.visible = self._hay_insumos
+        self.txt_insumo.visible = self._hay_insumos
+        if self._hay_insumos:
+            self.txt_insumo.value = (
+                f"{len(proveedores)} de las solicitudes del alcance son de "
+                f"Proveedor: su renglón es un insumo y necesita centro de "
+                f"costos y cuenta contable.")
 
     def _invalidar(self, _e=None) -> None:
         """Cambiar los criterios invalida la vista previa anterior.
@@ -175,31 +239,39 @@ class AsignacionMasiva:
         self._plan = None
         self.previa.visible = False
         self.btn_aplicar.disabled = True
+        self._refrescar_campos_insumo()
         self.modal.refrescar()
-
-    def _cambio_importe(self, _e=None) -> None:
-        self.bloque_fijo.visible = (
-            _clave(_IMPORTES, self.dd_importe.value, "") == asignacion.IMPORTE_FIJO)
-        self._invalidar()
 
     # ---------------------------------------------------- vista previa
     def _calcular(self, _e=None) -> None:
         nombre = (self.dd_nombre.value or "").strip()
-        if not nombre:
-            self.app.avisar("Indica el concepto o insumo que vas a asignar.",
-                            NARANJA)
+        empresa = self.dd_empresa.value or ""
+        sucursal = self.dd_sucursal.value or ""
+        fecha = self.campo_fecha.value or ""
+        if not nombre and not (empresa or sucursal or fecha):
+            self.app.avisar(
+                "Indica qué asignar: un concepto o insumo, o alguno de los "
+                "datos de la solicitud.", NARANJA)
+            return
+        # Solo se exigen cuando de verdad se va a escribir un renglón de
+        # insumo: con un alcance sin proveedores estos campos ni se muestran.
+        if nombre and self._hay_insumos and not (
+                (self.tf_centro.value or "").strip()
+                and (self.tf_cuenta.value or "").strip()):
+            self.app.avisar(
+                "El alcance incluye Proveedores: su renglón es un insumo y "
+                "necesita centro de costos y cuenta contable.", NARANJA)
             return
         plan = asignacion.calcular(
             self._lote_id,
-            alcance=_clave(_ALCANCES, self.dd_alcance.value, asignacion.TODAS),
+            alcance=self._alcance(),
             seleccionadas=self._seleccionadas,
             modo=_clave(_MODOS, self.dd_modo.value, asignacion.AGREGAR),
             nombre=nombre,
             centro_costos=(self.tf_centro.value or "").strip(),
             cuenta_contable=(self.tf_cuenta.value or "").strip(),
-            criterio_importe=_clave(_IMPORTES, self.dd_importe.value,
-                                    asignacion.TOTAL_SOLICITUD),
-            importe_fijo=parse_importe(self.tf_fijo.value))
+            criterio_importe=asignacion.EN_BLANCO,
+            empresa=empresa, sucursal=sucursal, fecha_pago=fecha)
         self._plan = plan
 
         if plan.error and not plan.cambios:

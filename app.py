@@ -104,14 +104,33 @@ class AppSolicitudesPago:
     # Servicio compartido: aviso tipo snackbar (opcional: botón de acción + callback).
     def avisar(self, mensaje: str, color: str | None = None,
                accion: str | None = None, on_accion=None, duracion=None) -> None:
+        # La «✕» va DENTRO del contenido y no en `action`, que ya lo ocupan los
+        # avisos con botón propio («Deshacer», «Abrir»). Los mensajes largos
+        # ocupan dos renglones y tapan la última fila de la tabla; sin forma de
+        # cerrarlos hay que esperar a que se vayan solos.
+        cerrar = ft.IconButton(
+            ft.Icons.CLOSE, icon_size=18, icon_color=ft.Colors.WHITE,
+            tooltip="Cerrar el aviso",
+            on_click=lambda _e: self._cerrar_aviso())
         barra = ft.SnackBar(
-            content=ft.Text(mensaje, color=ft.Colors.WHITE), bgcolor=color)
+            content=ft.Row(
+                [ft.Text(mensaje, color=ft.Colors.WHITE, expand=True), cerrar],
+                spacing=8, vertical_alignment=ft.CrossAxisAlignment.CENTER),
+            bgcolor=color)
         if accion:
             barra.action = accion
             barra.on_action = on_accion
         if duracion is not None:
             barra.duration = duracion
         self.page.show_dialog(barra)
+
+    def _cerrar_aviso(self) -> None:
+        """Retira el aviso. Best-effort: si ya se fue solo por su duración, no
+        hay nada que cerrar y `pop_dialog` no debe tumbar la app."""
+        try:
+            self.page.pop_dialog()
+        except Exception:  # noqa: BLE001 — el aviso pudo expirar antes del clic
+            pass
 
     def ir_a_bitacora(self) -> None:
         """Cambia a la Bitácora y la recarga. Lo usa el aviso de fin de lote:
@@ -200,6 +219,9 @@ class AppSolicitudesPago:
 
         self.page.controls.clear()
         self.page.add(encabezado, self._area, pie)
+        # `_vigilar_ventana` corre antes de que exista esta pantalla, así que el
+        # cierre del navegador se le cuelga a la página para que lo encuentre.
+        self.page._cerrar_rpa = self.solicitudes.cerrar_rpa
         # `page.on_resize` es un slot ÚNICO; se despacha a una lista de listeners.
         for pantalla in (self.solicitudes, self.documentos, self.conceptos,
                          self.bitacora, self.config):
@@ -503,6 +525,12 @@ def _vigilar_ventana(page: ft.Page) -> None:
             ft.WindowEventType.RESTORE,
         ):
             guardar()
+        elif e.type == ft.WindowEventType.CLOSE:
+            # El navegador del RPA no cuelga de esta ventana: vive en el hilo
+            # del motor y sobreviviría a la app como un Chromium huérfano.
+            cerrar = getattr(page, "_cerrar_rpa", None)
+            if callable(cerrar):
+                cerrar()
 
     page.window.on_event = on_event
 

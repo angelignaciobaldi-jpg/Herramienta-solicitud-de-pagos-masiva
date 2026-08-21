@@ -1,3 +1,13 @@
+; Carpeta que produce flet pack/PyInstaller (onedir). Por defecto la .\dist del
+; proyecto, que es lo que usa el CI (compila en una ruta corta). En un equipo
+; donde la ruta del proyecto es larga, construir.bat manda la salida fuera del
+; proyecto para no rebasar el MAX_PATH de Windows (260); en ese caso hay que
+; compilar apuntando ahi:
+;   iscc /DDistDir="C:\build\SolicitudesPago\dist\SolicitudesPago" instalador.iss
+#ifndef DistDir
+  #define DistDir ".\dist\SolicitudesPago"
+#endif
+
 [Setup]
 ; AppId FIJO: identifica la app entre versiones. Es lo que permite que el
 ; instalador descargado por el AutoUpdater actualice EN SITIO (sobrescribe) en
@@ -24,8 +34,9 @@ PrivilegesRequired=lowest
 
 [Files]
 ; Carpeta de salida de flet pack/PyInstaller (onedir). El nombre 'SolicitudesPago'
-; debe coincidir con el -n del build (ver construir.bat).
-Source: ".\dist\SolicitudesPago\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+; debe coincidir con el -n del build (ver construir.bat). La ruta viene de
+; DistDir, definido arriba y sobreescribible con iscc /DDistDir=...
+Source: "{#DistDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 ; Icono para los accesos directos, copiado a la RAIZ de {app}. Se toma del codigo
 ; fuente (no del build): PyInstaller (onedir) mete 'Imagenes' dentro de
 ; {app}\_internal, asi que un IconFilename a {app}\Imagenes\icon.ico no existiria.

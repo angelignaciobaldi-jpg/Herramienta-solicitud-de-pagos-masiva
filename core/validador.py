@@ -38,6 +38,11 @@ _CLABE = re.compile(r"^\d{18}$")
 ERROR = "ERROR"
 AVISO = "AVISO"
 
+# Códigos de hallazgo. Existen para que quien consume la validación pueda
+# distinguir un problema concreto SIN mirar el texto del mensaje, que está
+# escrito para leerse y puede reescribirse en cualquier momento.
+IMPORTE_EN_CERO = "importe_en_cero"
+
 
 @dataclass
 class Hallazgo:
@@ -46,6 +51,7 @@ class Hallazgo:
     campo: str
     mensaje: str
     severidad: str = ERROR
+    codigo: str = ""
 
     @property
     def es_error(self) -> bool:
@@ -208,17 +214,20 @@ def validar(solicitud: Solicitud, partidas: list[Partida]) -> list[Hallazgo]:
             h.append(Hallazgo("partidas", f"Concepto {i}: falta el nombre."))
         if p.importe <= 0:
             h.append(Hallazgo(
-                "partidas", f"Concepto {i}: el importe debe ser mayor que cero."))
+                "partidas", f"Concepto {i}: el importe debe ser mayor que cero.",
+                codigo=IMPORTE_EN_CERO))
     for i, p in enumerate(insumos, 1):
         if not (p.insumo_nombre.strip() or p.insumo_id.strip()):
             h.append(Hallazgo("partidas", f"Insumo {i}: falta el insumo."))
         if p.importe <= 0:
             h.append(Hallazgo(
-                "partidas", f"Insumo {i}: el importe debe ser mayor que cero."))
+                "partidas", f"Insumo {i}: el importe debe ser mayor que cero.",
+                codigo=IMPORTE_EN_CERO))
 
     total = total_desglose(solicitud.tipo_beneficiario, partidas)
     if esperadas and total <= 0:
-        h.append(Hallazgo("partidas", f"El total de {nombre_clase} quedó en cero."))
+        h.append(Hallazgo("partidas", f"El total de {nombre_clase} quedó en cero.",
+                          codigo=IMPORTE_EN_CERO))
 
     return h
 
