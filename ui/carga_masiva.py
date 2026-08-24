@@ -125,8 +125,11 @@ class CargaMasiva:
         self.modal.cuerpo.controls = [paso1, paso2, self.col_mapeo, self.previa]
 
     # -------------------------------------------------------- apertura
-    def abrir(self, lote_id: str) -> None:
+    def abrir(self, lote_id: str, parada: str = "LLENADA") -> None:
         self._lote_id = lote_id
+        # Lo importado hereda la parada del lote: si el lote está en «Guardar y
+        # autorizar», estas solicitudes no deben pararse a pedir revisión.
+        self._parada = parada
         self._ruta = ""
         self._importacion = None
         self.txt_archivo.value = "Ningún archivo elegido."
@@ -171,7 +174,8 @@ class CargaMasiva:
         """Lee y valida el archivo fuera del hilo de la interfaz."""
         try:
             importacion = await asyncio.to_thread(
-                adaptador.leer, self._ruta, self._lote_id, columnas=columnas)
+                adaptador.leer, self._ruta, self._lote_id, columnas=columnas,
+                parada=getattr(self, "_parada", "LLENADA"))
         except Exception as exc:  # noqa: BLE001
             importacion = adaptador.Importacion(error=str(exc))
         self._importacion = importacion

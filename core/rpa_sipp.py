@@ -226,6 +226,11 @@ class SesionSipp:
         self.reusar_sesion = reusar_sesion
         # Callback (paso, mensaje, nivel, captura) para alimentar la bitácora.
         self._on_bitacora = on_bitacora
+        # Lo pone `procesar_lote`. Sin esto, «Detener» solo se atendía entre
+        # solicitudes: los bucles de reintento —hasta cuatro vueltas con
+        # esperas de 60 s— seguían hasta agotarse aunque ya se hubiera pedido
+        # parar, y la app parecía congelada.
+        self.cancelado = None
         self._pw = None
         self.navegador = None
         self.contexto = None
@@ -420,12 +425,28 @@ class SesionSipp:
             "xpath=following-sibling::div[contains(@class,'chosen-container')][1]")
         contenedor.wait_for(state="visible", timeout=self.timeout_ms)
 
+        # El scroll va UNA vez, fuera del bucle. Dentro, cada reintento volvía a
+        # llevar la página al campo y el resultado era un vaivén de arriba
+        # abajo que parecía que el robot buscaba a ciegas. El campo no se mueve
+        # entre intentos: basta con dejarlo a la vista al principio.
+        try:
+            contenedor.scroll_into_view_if_needed()
+        except Exception:  # noqa: BLE001 — ya estaba a la vista
+            pass
+
         ultimo = None
         for intento in range(1, intentos + 1):
+            self.abortar_si_cancelan()
             try:
-                contenedor.scroll_into_view_if_needed()
                 contenedor.click()
                 buscador = contenedor.locator("input.chosen-search-input")
+                # Chosen se puebla cuando Angular termina de llenar el <select>
+                # y dispara `chosen:updated`. Puede haber opciones en el select
+                # y todavía ninguna en el widget: escribir en ese hueco filtra
+                # sobre una lista vacía y el intento se pierde entero.
+                self.esperar_a(
+                    lambda: contenedor.locator("li.active-result").count() > 0,
+                    tope_ms=4000, intervalo_ms=100)
                 buscador.click()
                 buscador.press("Control+a")
                 buscador.press("Delete")
@@ -439,6 +460,8 @@ class SesionSipp:
                 opcion.wait_for(state="visible", timeout=6000)
                 opcion.click()
                 return
+            except Cancelado:
+                raise                      # parar manda sobre reintentar
             except Exception as exc:  # noqa: BLE001 — se reintenta
                 ultimo = exc
                 self.anotar("seleccionar",
@@ -514,6 +537,11 @@ class SesionSipp:
                 f"para no capturar un dato incorrecto.")
         self.anotar("campo", detalle + " (SIPP filtró parte del texto)", "WARN")
 
+    def abortar_si_cancelan(self) -> None:
+        """Corta lo que se esté haciendo si ya se pulsó «Detener»."""
+        if callable(self.cancelado) and self.cancelado():
+            raise Cancelado()
+
     def esperar_a(self, condicion, tope_ms: int, intervalo_ms: int = 150) -> bool:
         """Sondea `condicion()` hasta que se cumpla o se agote `tope_ms`.
 
@@ -525,6 +553,7 @@ class SesionSipp:
         """
         vueltas = max(1, tope_ms // max(1, intervalo_ms))
         for _ in range(vueltas):
+            self.abortar_si_cancelan()
             try:
                 if condicion():
                     return True
@@ -594,9 +623,12 @@ class SesionSipp:
                else clave_o_loc)
         ultimo = None
         for intento in range(1, intentos + 1):
+            self.abortar_si_cancelan()
             try:
                 loc.first.click(timeout=self.timeout_ms)
                 return
+            except Cancelado:
+                raise
             except Exception as exc:  # noqa: BLE001
                 ultimo = exc
                 self.anotar("clic",
@@ -618,6 +650,7 @@ class SesionSipp:
         entrada = (self.loc(clave_o_loc, dentro)
                    if isinstance(clave_o_loc, str) else clave_o_loc)
         for intento in range(1, intentos + 1):
+            self.abortar_si_cancelan()
             entrada.first.set_input_files(ruta)
             # La subida es una petición AJAX: se espera a que la red se calme en
             # vez de contar cuatro segundos siempre. Una carátula de 200 KB
@@ -771,7 +804,11 @@ class FlujoSolicitudPago:
 
     def __init__(self, sesion: SesionSipp, cancelado=None) -> None:
         self.s = sesion
-        self._cancelado = cancelado
+        # Se guarda en la SESIÓN, no aquí: sus esperas y bucles de reintento
+        # son los tramos largos y también tienen que poder cortarse. Así hay
+        # un solo sitio que sabe si ya se pidió parar.
+        if cancelado is not None:
+            sesion.cancelado = cancelado
 
     def abortar_si_cancelan(self) -> None:
         """Corta la captura en curso si se pulsó «Detener».
@@ -782,8 +819,7 @@ class FlujoSolicitudPago:
         no queda folio ni pago, y esa solicitud vuelve a su estado anterior
         para que el siguiente lote la tome desde cero.
         """
-        if callable(self._cancelado) and self._cancelado():
-            raise Cancelado()
+        self.s.abortar_si_cancelan()
 
     # ------------------------------------------------------------ helpers
     def _panel(self, tipo_beneficiario: str):
@@ -834,6 +870,38 @@ class FlujoSolicitudPago:
         self.s.ir_a_solicitud_pago()
 
     # -------------------------------------------------------- idempotencia
+    def dejar_listado_limpio(self) -> None:
+        """Deja el portal en el listado general, SIN filtros, al terminar.
+
+        El navegador se queda abierto para revisar lo capturado, y lo que se
+        quiere ver entonces son TODAS las solicitudes del lote. Pero el listado
+        conserva los filtros de la última búsqueda de duplicados —se filtra por
+        descripción para no capturar dos veces el mismo pago—, así que sin
+        limpiarlos se ve una sola fila, o ninguna, y parece que no se capturó
+        nada.
+
+        Es cortesía, no parte de la captura: cualquier fallo aquí se anota y se
+        sigue. El lote ya terminó y su resultado no depende de esto.
+        """
+        s = self.s
+        try:
+            self.volver_al_listado()
+            for clave in ("listado.filtro_beneficiario",
+                          "listado.filtro_descripcion",
+                          "listado.filtro_desde", "listado.filtro_hasta"):
+                if s.existe(clave):
+                    try:
+                        s.loc(clave).first.fill("")
+                    except Exception:  # noqa: BLE001 — ese filtro no aplica
+                        pass
+            if s.existe("listado.buscar"):
+                s.loc("listado.buscar").first.click()
+                s.esperar_quieto(8000)
+            s.anotar("listado", "Listado general sin filtros, listo para revisar")
+        except Exception as exc:  # noqa: BLE001 — el lote ya terminó
+            s.anotar("listado",
+                     f"No se pudo dejar el listado sin filtros: {exc}", "WARN")
+
     def buscar_existente(self, solicitud: Solicitud) -> str:
         """Busca en el listado si esta solicitud ya se capturó. Devuelve el folio
         si la encuentra, o cadena vacía.
@@ -1462,9 +1530,18 @@ class FlujoSolicitudPago:
             aceptar = s.loc("acc.confirmar").first
             aceptar.wait_for(state="visible", timeout=15000)
             aceptar.click()
+        except Cancelado:
+            raise
         except Exception:  # noqa: BLE001 — no siempre pide confirmación
             pass
-        s.page.wait_for_timeout(4000)
+        # Los avisos que SIPP encadena tras confirmar tapan el formulario y
+        # esconden tanto el folio como el botón de autorizar.
+        s.cerrar_alertas()
+        # El guardado es una petición al servidor: se espera a que la red se
+        # calme en vez de contar cuatro segundos. Con el portal cargado tardaba
+        # más que eso y la solicitud se daba por no guardada aunque SÍ lo
+        # estuviera —quedaba en ERROR con su folio ya consumido en SIPP—.
+        s.esperar_quieto(15000)
         if s.hay_error_sistema():
             s.captura("error_guardar")
             raise ErrorRpa("SIPP reportó un error del sistema al guardar.")
@@ -1475,7 +1552,12 @@ class FlujoSolicitudPago:
         # ERP: el peor de los desenlaces, porque nadie la vuelve a intentar.
         #
         # La evidencia es que aparezca el botón «Solicitar Autorización», que
-        # SIPP solo muestra cuando la solicitud ya tiene folio.
+        # SIPP solo muestra cuando la solicitud ya tiene folio. Se SONDEA hasta
+        # 20 s en vez de mirar una sola vez: la pantalla se repinta después de
+        # responder, y mirar demasiado pronto es no ver nada.
+        s.esperar_a(lambda: bool(self._leer_folio())
+                    or s.visible_("acc.autorizar"), tope_ms=20000,
+                    intervalo_ms=400)
         folio = self._leer_folio()
         guardada = folio or s.visible_("acc.autorizar")
         if not guardada:
@@ -1874,7 +1956,9 @@ def procesar_lote(lote_id: str, usuario: str, contrasena: str, *,
         return resumen
 
     pausar = callable(en_pausa)
+    ultimo_estado = ""
     with SesionSipp(url_login, visible=visible) as sesion:
+        sesion.cancelado = cancelado
         sesion.login(usuario, contrasena)
         sesion.configurar_sesion(empresa_sesion, sucursal_sesion)
         sesion.ir_a_solicitud_pago()
@@ -1903,6 +1987,7 @@ def procesar_lote(lote_id: str, usuario: str, contrasena: str, *,
             docs = (documentos_por_solicitud(solicitud)
                     if callable(documentos_por_solicitud)
                     else documentos.de_solicitud(solicitud.id))
+            res = None
             try:
                 res = flujo.capturar(solicitud, partidas, docs)
                 db.actualizar_estado(solicitud.id, res.estado,
@@ -1982,6 +2067,7 @@ def procesar_lote(lote_id: str, usuario: str, contrasena: str, *,
                     f"{solicitud.beneficiario_nombre}: {exc}")
                 avisar(i=i, total=total, nombre=solicitud.beneficiario_nombre,
                        estado="error", mensaje=str(exc))
+            ultimo_estado = getattr(res, "estado", "") or ""
             if i < total:
                 try:
                     flujo.volver_al_listado()
@@ -1992,6 +2078,12 @@ def procesar_lote(lote_id: str, usuario: str, contrasena: str, *,
         # formularios llenos y los registros recién capturados, y cerrarlo aquí
         # obligaría a volver a entrar a SIPP para comprobar cualquier cosa. Se
         # espera EN ESTE HILO porque es el único que puede tocar Playwright.
+        # Se termina en el listado general y sin filtros, para que se vea el
+        # trabajo completo. Salvo con «Llenar y esperar»: ahí el formulario
+        # quedó lleno en pantalla a propósito y navegar lo perdería.
+        if ultimo_estado != "LLENADA":
+            flujo.dejar_listado_limpio()
+
         if callable(esperar_cierre):
             avisar(estado="navegador_abierto",
                    mensaje="El navegador quedó abierto para que revises lo "

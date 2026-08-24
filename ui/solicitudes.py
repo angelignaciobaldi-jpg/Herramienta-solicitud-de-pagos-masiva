@@ -18,7 +18,8 @@ import threading
 
 import flet as ft
 
-from core import asignacion, conceptos as cat_conceptos, db, documentos
+from core import (asignacion, conceptos as cat_conceptos, db,
+                  documentos, validador)
 from core.catalogos import (AMBIENTES, ETIQUETA_ESTADO, ETIQUETA_PARADA,
                             PARADA_DEFECTO, PARADAS, TIPOS_BENEFICIARIO)
 from core.db import CONCEPTO, INSUMO, Lote, Partida, Solicitud
@@ -789,9 +790,16 @@ class SeccionSolicitudes:
             self.app.avisar("Primero crea un lote.", NARANJA)
             return
 
-        abrir = {"manual": lambda: self.captura.abrir(self._lote.id),
-                 "caratulas": lambda: self.alta_caratulas.abrir(self._lote.id),
-                 "excel": lambda: self.carga.abrir(self._lote.id)}
+        # La parada del LOTE viaja a los modales de importación: sin ella, lo
+        # que crean nace siempre en «Llenar y esperar» y el lote se detiene a
+        # pedir revisión aunque esté configurado para guardar y autorizar.
+        parada = self._lote.parada_default or PARADA_DEFECTO
+        abrir = {
+            "manual": lambda: self.captura.abrir(self._lote.id),
+            "caratulas": lambda: self.alta_caratulas.abrir(self._lote.id,
+                                                           parada=parada),
+            "excel": lambda: self.carga.abrir(self._lote.id, parada=parada),
+        }
 
         def elegir(clave: str):
             def _accion(_e=None) -> None:
@@ -1007,8 +1015,15 @@ class SeccionSolicitudes:
             actions_alignment=ft.MainAxisAlignment.END))
 
     def _recibir_solicitud(self, solicitud: Solicitud,
-                           partidas: list[Partida]) -> None:
-        """Callback del modal de captura: persiste y repinta."""
+                           partidas: list[Partida],
+                           archivos: "dict[str, str] | None" = None) -> None:
+        """Callback del modal de captura: persiste, adjunta y repinta.
+
+        El orden no es negociable: la solicitud primero —los documentos cuelgan
+        de su fila—, los documentos después, y el repintado AL FINAL. Repintar
+        antes de registrarlos dejaba la tabla diciendo que faltaba la carátula
+        recién adjuntada.
+        """
         if not solicitud.lote_id:
             solicitud.lote_id = self._lote.id if self._lote else ""
         if not solicitud.parada:
@@ -1022,6 +1037,12 @@ class SeccionSolicitudes:
         except db.ClaveDuplicada as exc:
             self.app.avisar(str(exc), ROJO)
             return
+        for tipo, ruta in (archivos or {}).items():
+            try:
+                documentos.registrar(solicitud.id, ruta, tipo,
+                                     solicitud.lote_id)
+            except Exception as exc:  # noqa: BLE001 — la solicitud ya se guardó
+                self.app.avisar(f"No se pudo adjuntar «{tipo}»: {exc}", ROJO)
         self._recargar_solicitudes()
         self.app.avisar("Solicitud guardada.", VERDE)
 
@@ -1117,6 +1138,12 @@ class SeccionSolicitudes:
                             NARANJA)
             return
         sin_validar = [s for s in pendientes if s.estado == "PENDIENTE"]
+        # Una fecha ya pasada NO se deja lanzar. SIPP acepta la solicitud y el
+        # pago queda registrado con fecha anterior a su captura, así que el
+        # error solo se ve al conciliar. Se nombran las solicitudes para poder
+        # corregirlas, en vez de decir cuántas son.
+        vencidas = [s for s in pendientes
+                    if validador.fecha_vencida(s.fecha_pago)]
         ambiente = ambiente_actual()
         paradas = {ETIQUETA_PARADA.get(s.parada, s.parada) for s in pendientes}
 
@@ -1134,6 +1161,19 @@ class SeccionSolicitudes:
             detalle.append(ft.Text(
                 f"{len(sin_validar)} no se han validado; si traen datos "
                 f"incompletos, fallarán al capturarse.", color=NARANJA))
+        if vencidas:
+            # Se NOMBRAN las solicitudes, no se cuentan: para corregirlas hay
+            # que saber cuáles son. Se listan las primeras y se dice cuántas
+            # quedan, para no llenar el diálogo con doscientas.
+            renglones = [f"  • {s.beneficiario_nombre or '—'} — {s.fecha_pago}"
+                         for s in vencidas[:8]]
+            if len(vencidas) > 8:
+                renglones.append(f"  …y {len(vencidas) - 8} más")
+            detalle.append(ft.Text(
+                f"{len(vencidas)} solicitud(es) tienen la fecha de pago "
+                f"VENCIDA. Corrígelas antes de ejecutar el lote:"
+                + "\n" + "\n".join(renglones),
+                color=ROJO, weight=ft.FontWeight.BOLD))
         # Sin carátula, el alta del beneficiario queda a medias en SIPP. Se
         # avisa ANTES de arrancar: descubrirlo a la mitad del lote obliga a
         # limpiar registros a mano.
@@ -1162,7 +1202,7 @@ class SeccionSolicitudes:
                 ft.TextButton("Cancelar",
                               on_click=lambda _e: self.page.pop_dialog()),
                 ft.FilledButton("Ejecutar", icon=ft.Icons.PLAY_ARROW,
-                                on_click=arrancar),
+                                on_click=arrancar, disabled=bool(vencidas)),
             ],
             actions_alignment=ft.MainAxisAlignment.END))
 

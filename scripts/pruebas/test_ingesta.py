@@ -54,7 +54,7 @@ def _fila_completa(**extra) -> list:
         beneficiario_rfc="XAXX010101000", beneficiario_correo="j@x.invalid",
         forma_pago="Transferencia", tipo_gasto="No Deducible",
         cuenta_banco="BBVA", cuenta_clabe="012345678901234568",
-        fecha_pago="15/09/2026", moneda="Pesos (MXN)",
+        fecha_pago=comun.fecha_futura(), moneda="Pesos (MXN)",
         descripcion="Finiquito", concepto_nombre="PAGO PTU",
         importe="12500.00")
     datos.update(extra)
@@ -127,7 +127,7 @@ def probar_lee_una_fila_completa():
         beneficiario_rfc="XAXX010101000", beneficiario_correo="j@x.invalid",
         forma_pago="Transferencia", tipo_gasto="No Deducible",
         cuenta_banco="BBVA", cuenta_clabe="012345678901234568",
-        fecha_pago="15/09/2026", moneda="Pesos (MXN)",
+        fecha_pago=comun.fecha_futura(), moneda="Pesos (MXN)",
         descripcion="Finiquito", concepto_nombre="PAGO PTU",
         importe="12500.00")])
     imp = adaptador.leer(lleno, "lote-x")
@@ -147,7 +147,7 @@ def probar_la_clabe_conserva_sus_ceros():
         tipo_beneficiario="Acreedor", beneficiario_nombre="ANA LOPEZ",
         beneficiario_rfc="XAXX010101000", forma_pago="Transferencia",
         tipo_gasto="No Deducible", cuenta_clabe="012345678901234568",
-        fecha_pago="15/09/2026", concepto_nombre="PAGO PTU", importe="100")])
+        fecha_pago=comun.fecha_futura(), concepto_nombre="PAGO PTU", importe="100")])
     clabe = adaptador.leer(lleno, "l").filas[0].solicitud.cuenta_clabe
     assert clabe == "012345678901234568", clabe
 
@@ -159,7 +159,7 @@ def probar_importe_con_formato_de_moneda():
         tipo_beneficiario="Acreedor", beneficiario_nombre="ANA LOPEZ",
         beneficiario_rfc="XAXX010101000", forma_pago="Transferencia",
         tipo_gasto="No Deducible", cuenta_clabe="012345678901234568",
-        fecha_pago="15/09/2026", concepto_nombre="PAGO PTU",
+        fecha_pago=comun.fecha_futura(), concepto_nombre="PAGO PTU",
         importe="$8,300.50")])
     assert adaptador.leer(lleno, "l").filas[0].solicitud.importe_total == 8300.50
 
@@ -172,13 +172,13 @@ def probar_la_clase_la_impone_el_tipo_de_beneficiario():
               beneficiario_nombre="PROVEEDOR SA",
               beneficiario_rfc="XAXX010101000", forma_pago="Transferencia",
               tipo_gasto="No Deducible", cuenta_clabe="012345678901234568",
-              cuenta_banco="BBVA", fecha_pago="15/09/2026",
+              cuenta_banco="BBVA", fecha_pago=comun.fecha_futura(),
               concepto_nombre="Mantenimiento de equipo", importe="3000"),
         _fila(empresa="Abastecedora", sucursal="Corporativo",
               tipo_beneficiario="Acreedor", beneficiario_nombre="ACREEDOR SA",
               beneficiario_rfc="XAXX010101000", forma_pago="Transferencia",
               tipo_gasto="No Deducible", cuenta_clabe="012345678901234568",
-              cuenta_banco="BBVA", fecha_pago="15/09/2026",
+              cuenta_banco="BBVA", fecha_pago=comun.fecha_futura(),
               concepto_nombre="PAGO PTU", importe="4000"),
     ])
     filas = adaptador.leer(lleno, "l").filas
@@ -200,7 +200,7 @@ def probar_la_hoja_de_partidas_manda():
                beneficiario_nombre="CONSTRUCTORA DEL NORTE",
                beneficiario_rfc="XAXX010101000", forma_pago="Transferencia",
                tipo_gasto="No Deducible", cuenta_clabe="012345678901234568",
-               fecha_pago="15/09/2026", concepto_nombre="IGNORAR ESTE",
+               fecha_pago=comun.fecha_futura(), concepto_nombre="IGNORAR ESTE",
                importe="1")],
         partidas=[
             ["SP-004", "Concepto", "MANTENIMIENTO", "", "", "", "", "5000.00"],
@@ -222,7 +222,7 @@ def probar_fila_incompleta_no_bloquea_a_las_demas():
               tipo_beneficiario="Acreedor", beneficiario_nombre="BUENA",
               beneficiario_rfc="XAXX010101000", forma_pago="Transferencia",
               tipo_gasto="No Deducible", cuenta_clabe="012345678901234568",
-              cuenta_banco="BBVA", fecha_pago="15/09/2026",
+              cuenta_banco="BBVA", fecha_pago=comun.fecha_futura(),
               concepto_nombre="PAGO PTU", importe="1000"),
         # Sin empresa, CLABE corta y sin fecha.
         _fila(sucursal="Corporativo", tipo_beneficiario="Acreedor",
@@ -241,7 +241,7 @@ def probar_duplicados_dentro_del_archivo():
                  tipo_beneficiario="Acreedor", beneficiario_nombre="ANA",
                  beneficiario_rfc="XAXX010101000", forma_pago="Transferencia",
                  tipo_gasto="No Deducible", cuenta_clabe="012345678901234568",
-                 fecha_pago="15/09/2026", concepto_nombre="PAGO PTU",
+                 fecha_pago=comun.fecha_futura(), concepto_nombre="PAGO PTU",
                  importe="100")
     imp = adaptador.leer(_plantilla_llena([fila, list(fila)]), "l")
     assert adaptador.detectar_duplicados(imp.filas)
@@ -427,21 +427,21 @@ def probar_el_excel_completa_por_nombre():
               beneficiario_nombre="RUIZ SOTO MARIA",
               beneficiario_rfc="XAXX010101000", forma_pago="Transferencia",
               tipo_gasto="No Deducible", cuenta_clabe="002345678901234565",
-              fecha_pago="15/09/2026", concepto_nombre="VIGILANCIA",
+              fecha_pago=comun.fecha_futura(), concepto_nombre="VIGILANCIA",
               importe="8300.50"),
         _fila(empresa="Abastecedora", sucursal="Corporativo",
               tipo_beneficiario="Acreedor",
               beneficiario_nombre="JUAN PEREZ LOPEZ",
               beneficiario_rfc="XAXX010101000", forma_pago="Transferencia",
               tipo_gasto="No Deducible", cuenta_clabe="012345678901234568",
-              fecha_pago="15/09/2026", concepto_nombre="VIGILANCIA",
+              fecha_pago=comun.fecha_futura(), concepto_nombre="VIGILANCIA",
               importe="12500.00"),
         _fila(empresa="Abastecedora", sucursal="Corporativo",
               tipo_beneficiario="Acreedor",
               beneficiario_nombre="SIN CARATULA PEREZ",
               beneficiario_rfc="XAXX010101000", forma_pago="Transferencia",
               tipo_gasto="No Deducible", cuenta_clabe="012345678901234597",
-              fecha_pago="15/09/2026", concepto_nombre="VIGILANCIA",
+              fecha_pago=comun.fecha_futura(), concepto_nombre="VIGILANCIA",
               importe="999.00"),
     ])
     filas = adaptador.leer(lleno, lote.id).filas
@@ -470,7 +470,7 @@ def probar_una_fila_del_excel_se_usa_una_vez():
         tipo_beneficiario="Acreedor", beneficiario_nombre="JUAN PEREZ LOPEZ",
         beneficiario_rfc="XAXX010101000", forma_pago="Transferencia",
         tipo_gasto="No Deducible", cuenta_clabe="012345678901234568",
-        fecha_pago="15/09/2026", concepto_nombre="VIGILANCIA",
+        fecha_pago=comun.fecha_futura(), concepto_nombre="VIGILANCIA",
         importe="100")])
     resumen = caratulas.completar_con_excel(
         borradores, adaptador.leer(lleno, lote.id).filas)
@@ -820,7 +820,7 @@ def probar_el_excel_empareja_por_clabe_aunque_el_nombre_difiera():
         beneficiario_nombre="MA. RUIZ S. DE JESUS",
         beneficiario_rfc="XAXX010101000", forma_pago="Transferencia",
         tipo_gasto="No Deducible", cuenta_clabe="012345678901234568",
-        fecha_pago="15/09/2026", concepto_nombre="VIGILANCIA",
+        fecha_pago=comun.fecha_futura(), concepto_nombre="VIGILANCIA",
         importe="8300.50")])
     resumen = caratulas.completar_con_excel(
         borradores, adaptador.leer(lleno, lote.id).filas)
@@ -843,7 +843,7 @@ def probar_sin_clabe_se_empareja_por_nombre():
         tipo_beneficiario="Acreedor", beneficiario_nombre="PEREZ LOPEZ JUAN",
         beneficiario_rfc="XAXX010101000", forma_pago="Transferencia",
         tipo_gasto="No Deducible", cuenta_clabe="072987654321098764",
-        fecha_pago="15/09/2026", concepto_nombre="VIGILANCIA",
+        fecha_pago=comun.fecha_futura(), concepto_nombre="VIGILANCIA",
         importe="100")])
     resumen = caratulas.completar_con_excel(
         borradores, adaptador.leer(lleno, lote.id).filas)
@@ -864,7 +864,7 @@ def probar_clabe_distinta_conserva_la_de_la_caratula_y_avisa():
         tipo_beneficiario="Acreedor", beneficiario_nombre="ANA LOPEZ RUIZ",
         beneficiario_rfc="XAXX010101000", forma_pago="Transferencia",
         tipo_gasto="No Deducible", cuenta_clabe="072987654321098764",
-        fecha_pago="15/09/2026", concepto_nombre="VIGILANCIA",
+        fecha_pago=comun.fecha_futura(), concepto_nombre="VIGILANCIA",
         importe="500")])
     resumen = caratulas.completar_con_excel(
         borradores, adaptador.leer(lleno, lote.id).filas)
@@ -890,7 +890,7 @@ def probar_la_clabe_gana_la_fila_antes_que_el_nombre():
         tipo_beneficiario="Acreedor", beneficiario_nombre="JUAN PEREZ LOPEZ",
         beneficiario_rfc="XAXX010101000", forma_pago="Transferencia",
         tipo_gasto="No Deducible", cuenta_clabe="012345678901234568",
-        fecha_pago="15/09/2026", concepto_nombre="VIGILANCIA",
+        fecha_pago=comun.fecha_futura(), concepto_nombre="VIGILANCIA",
         importe="750")])
     # El que NO tiene CLABE va primero en la lista, para que ganar por orden no
     # baste: tiene que ganar por criterio.

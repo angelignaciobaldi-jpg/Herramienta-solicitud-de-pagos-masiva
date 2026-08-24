@@ -191,8 +191,11 @@ class AltaDesdeCaratulas:
         self.modal.cuerpo.controls = [paso1, paso2, paso3, self.previa]
 
     # -------------------------------------------------------- apertura
-    def abrir(self, lote_id: str) -> None:
+    def abrir(self, lote_id: str, parada: str = "LLENADA") -> None:
         self._lote_id = lote_id
+        # Lo que se dé de alta hereda la parada del lote, no una fija: si el
+        # lote está en «Guardar y autorizar», estas solicitudes también.
+        self._parada = parada
         self._borradores = []
         self._detener = False
         self._modo_lectura(False)
@@ -387,6 +390,7 @@ class AltaDesdeCaratulas:
         try:
             self._borradores = await asyncio.to_thread(
                 caratulas.crear_borradores, rutas, self._lote_id,
+                parada=getattr(self, "_parada", "LLENADA"),
                 empresa=self.dd_empresa.value or "",
                 sucursal=self.dd_sucursal.value or "",
                 tipo_beneficiario=self.dd_tipo.value or "Acreedor",

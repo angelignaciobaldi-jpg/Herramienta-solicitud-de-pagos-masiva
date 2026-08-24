@@ -160,7 +160,7 @@ def probar_validador_acepta_una_solicitud_completa():
         beneficiario_correo="a@ejemplo.invalid",
         cuenta_clabe="012345678901234568", cuenta_banco="BBVA",
         forma_pago="Transferencia", tipo_gasto="No Deducible",
-        fecha_pago="20/09/2026", descripcion="Pago")
+        fecha_pago=comun.fecha_futura(), descripcion="Pago")
     hallazgos = validador.validar(s, [comun.concepto("PAGO PTU", 1000.0)])
     assert not validador.hay_errores(hallazgos), validador.resumen(hallazgos)
 
@@ -183,7 +183,7 @@ def probar_clabe_de_18_digitos():
         lote_id=lote.id, empresa="Abastecedora", sucursal="Corporativo",
         tipo_beneficiario="Acreedor", beneficiario_nombre="ANA",
         beneficiario_rfc="XAXX010101000", forma_pago="Transferencia",
-        tipo_gasto="No Deducible", fecha_pago="20/09/2026")
+        tipo_gasto="No Deducible", fecha_pago=comun.fecha_futura())
     partidas = [comun.concepto("PAGO PTU", 100.0)]
 
     corta = validador.validar(Solicitud(**base, cuenta_clabe="123"), partidas)
@@ -204,7 +204,7 @@ def probar_la_clabe_no_pasa_solo_por_medir_18():
         lote_id=lote.id, empresa="Abastecedora", sucursal="Corporativo",
         tipo_beneficiario="Acreedor", beneficiario_nombre="ANA",
         beneficiario_rfc="XAXX010101000", forma_pago="Transferencia",
-        tipo_gasto="No Deducible", fecha_pago="20/09/2026")
+        tipo_gasto="No Deducible", fecha_pago=comun.fecha_futura())
     partidas = [comun.concepto("PAGO PTU", 100.0)]
 
     # La misma CLABE buena de la prueba anterior con el último dígito cambiado.
@@ -228,7 +228,7 @@ def probar_rfc_faltante_es_aviso_no_error():
         beneficiario_correo="a@ejemplo.invalid",
         cuenta_clabe="012345678901234568", cuenta_banco="BBVA",
         forma_pago="Transferencia", tipo_gasto="No Deducible",
-        fecha_pago="20/09/2026")
+        fecha_pago=comun.fecha_futura())
     hallazgos = validador.validar(s, [comun.concepto("PAGO PTU", 100.0)])
     assert not validador.hay_errores(hallazgos)
     assert any("RFC" in h.mensaje and not h.es_error for h in hallazgos)
@@ -242,7 +242,7 @@ def probar_rfc_mal_formado_si_es_error():
         tipo_beneficiario="Acreedor", beneficiario_nombre="ANA",
         beneficiario_rfc="NO-ES-UN-RFC", cuenta_clabe="012345678901234568",
         forma_pago="Transferencia", tipo_gasto="No Deducible",
-        fecha_pago="20/09/2026")
+        fecha_pago=comun.fecha_futura())
     hallazgos = validador.validar(s, [comun.concepto("PAGO PTU", 100.0)])
     assert any("RFC" in h.mensaje for h in hallazgos if h.es_error)
 
@@ -255,7 +255,7 @@ def probar_proveedor_necesita_insumos_no_conceptos():
         tipo_beneficiario="Proveedor", beneficiario_nombre="PROVEEDOR SA",
         beneficiario_rfc="XAXX010101000", cuenta_clabe="012345678901234568",
         cuenta_banco="BBVA", forma_pago="Transferencia",
-        tipo_gasto="No Deducible", fecha_pago="20/09/2026")
+        tipo_gasto="No Deducible", fecha_pago=comun.fecha_futura())
 
     con_insumo = validador.validar(Solicitud(**base),
                                    [comun.insumo("Mantenimiento", 2500.0)])
@@ -275,7 +275,7 @@ def probar_renglon_de_la_otra_clase_es_solo_aviso():
         beneficiario_rfc="XAXX010101000", beneficiario_correo="a@b.invalid",
         cuenta_clabe="012345678901234568", cuenta_banco="BBVA",
         forma_pago="Transferencia", tipo_gasto="No Deducible",
-        fecha_pago="20/09/2026")
+        fecha_pago=comun.fecha_futura())
     hallazgos = validador.validar(s, [comun.concepto("PAGO PTU", 400.0),
                                       comun.insumo("Sobrante", 999.0)])
     assert not validador.hay_errores(hallazgos)
@@ -335,3 +335,48 @@ def probar_migracion_del_catalogo_de_conceptos():
 
     db.inicializar()          # y es idempotente
     assert len(conceptos.listar()) == 3
+
+
+# --------------------------------------------------------------------------- #
+#  La fecha de pago no puede estar vencida
+# --------------------------------------------------------------------------- #
+def probar_una_fecha_de_pago_ya_pasada_es_error():
+    """SIPP la acepta y el pago queda con fecha anterior a su captura"""
+    lote = comun.lote()
+    s = comun.solicitud(lote.id, "ANA LOPEZ", fecha_pago=comun.fecha_pasada())
+    hallazgos = validador.validar(s, db.listar_partidas(s.id))
+    vencida = [h for h in hallazgos if h.codigo == validador.FECHA_VENCIDA]
+    assert vencida, "la fecha vencida debe reportarse"
+    assert vencida[0].es_error, "y bloquear, no solo avisar"
+    assert s.fecha_pago in vencida[0].mensaje, "hay que decir cuál es la fecha"
+
+
+def probar_la_fecha_de_hoy_es_valida():
+    """el candado es «anterior a hoy», no «posterior a hoy»"""
+    # Pagar hoy es lo normal; rechazarlo obligaría a poner siempre mañana.
+    from datetime import date
+
+    assert not validador.fecha_vencida(date.today().strftime("%d/%m/%Y"))
+    lote = comun.lote()
+    s = comun.solicitud(lote.id, "ANA LOPEZ",
+                        fecha_pago=date.today().strftime("%d/%m/%Y"))
+    assert not [h for h in validador.validar(s, db.listar_partidas(s.id))
+                if h.codigo == validador.FECHA_VENCIDA]
+
+
+def probar_el_candado_de_fecha_no_depende_del_dia_en_que_se_pruebe():
+    """se compara contra una fecha que se pasa, no contra el reloj"""
+    # Sin esto no habría forma de probar el caso «vencida» sin que la prueba
+    # caducara: es lo mismo que hacía fallar a la suite con fechas fijas.
+    from datetime import date
+
+    referencia = date(2026, 6, 15)
+    assert validador.fecha_vencida("14/06/2026", hoy=referencia)
+    assert not validador.fecha_vencida("15/06/2026", hoy=referencia)
+    assert not validador.fecha_vencida("16/06/2026", hoy=referencia)
+
+
+def probar_una_fecha_ilegible_no_se_reporta_como_vencida():
+    """el formato lo reporta su propia regla, sin duplicar el mensaje"""
+    assert not validador.fecha_vencida("no es una fecha")
+    assert not validador.fecha_vencida("")
