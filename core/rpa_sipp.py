@@ -1521,19 +1521,41 @@ class FlujoSolicitudPago:
         return limpio in ("", "0", "0.00", ".00")
 
     # ------------------------------------------------------------ guardado
-    def guardar(self) -> str:
-        """Guarda la solicitud y devuelve su folio (vacío si no logró leerlo)."""
+    def guardar(self, solicitud: "Solicitud | None" = None) -> str:
+        """Guarda la solicitud y devuelve su folio (vacío si no logró leerlo).
+
+        `solicitud` se usa como ÚLTIMO recurso: si las dos señales de pantalla
+        fallan, se va al listado a comprobar si de verdad se guardó. Un falso
+        negativo aquí es caro —la solicitud queda en ERROR con su folio ya
+        consumido en SIPP— y nadie la vuelve a intentar.
+        """
         s = self.s
         s.anotar("guardar", "Guardando la solicitud")
         s.clic_con_reintento("acc.guardar", "Guardar")
+
+        # El diálogo de confirmación: si aparece y NO se acepta, SIPP no guarda
+        # nada y después no hay forma de saber por qué. Se deja constancia de
+        # cuál de los dos caminos se tomó.
+        confirmado = False
         try:
             aceptar = s.loc("acc.confirmar").first
             aceptar.wait_for(state="visible", timeout=15000)
             aceptar.click()
+            confirmado = True
         except Cancelado:
             raise
         except Exception:  # noqa: BLE001 — no siempre pide confirmación
             pass
+        s.anotar("guardar", "Confirmación aceptada" if confirmado
+                 else "SIPP no pidió confirmación")
+
+        # Lo que SIPP conteste se lee ANTES de cerrar nada: sus alertas llevan
+        # el motivo del rechazo —un campo que falta, un importe que no cuadra—
+        # y cerrarlas primero deja el fallo sin explicación. Es exactamente lo
+        # que hacía que este error dijera solo «no confirmó».
+        aviso = " ".join((s.texto_alertas() or "").split())
+        if aviso:
+            s.anotar("guardar", f"SIPP respondió: {aviso[:300]}", "WARN")
         # Los avisos que SIPP encadena tras confirmar tapan el formulario y
         # esconden tanto el folio como el botón de autorizar.
         s.cerrar_alertas()
@@ -1560,13 +1582,44 @@ class FlujoSolicitudPago:
                     intervalo_ms=400)
         folio = self._leer_folio()
         guardada = folio or s.visible_("acc.autorizar")
+        if not guardada and solicitud is not None:
+            # Las dos señales viven en esta pantalla y las dos pueden fallar:
+            # el folio si el modelo de Angular cambió de forma, y el botón de
+            # autorizar si SIPP lo condiciona a algo más. El listado es la
+            # fuente de verdad, así que antes de dar el guardado por fallido se
+            # comprueba ahí. Cuesta una navegación, pero solo se paga cuando ya
+            # íbamos a fallar.
+            s.anotar("guardar",
+                     "No se vio folio en pantalla; se comprueba en el listado",
+                     "WARN")
+            try:
+                folio = self.buscar_existente(solicitud)
+            except Exception:  # noqa: BLE001 — el listado tampoco responde
+                folio = ""
+            if folio:
+                s.anotar("guardar",
+                         f"Estaba guardada: aparece en el listado con folio "
+                         f"{folio}")
+                return folio
         if not guardada:
             ruta = s.captura("guardar_sin_efecto")
+            # El motivo real casi siempre está en la alerta que SIPP mostró o
+            # en que el botón Guardar siga ahí (señal de que no llegó a
+            # procesar). Sin esto, el mensaje obligaba a abrir la captura para
+            # empezar a averiguar algo.
+            pistas = []
+            if aviso:
+                pistas.append(f"SIPP respondió: «{aviso[:300]}»")
+            if not confirmado:
+                pistas.append("no apareció el diálogo de confirmación")
+            if s.visible_("acc.guardar"):
+                pistas.append("el botón Guardar sigue en pantalla, así que la "
+                              "solicitud no llegó a procesarse")
+            detalle = (" " + ". ".join(pistas) + ".") if pistas else ""
             raise ErrorRpa(
                 "Se pulsó Guardar pero SIPP no confirmó la solicitud: no hay "
-                "folio ni aparece «Solicitar Autorización». Revisa la captura "
-                f"({os.path.basename(ruta) or 'sin captura'}) antes de "
-                "reintentar.")
+                f"folio ni aparece «Solicitar Autorización».{detalle} Revisa la "
+                f"captura ({os.path.basename(ruta) or 'sin captura'}).")
         if not folio:
             s.anotar("guardar",
                      "Guardada, pero no se pudo leer el folio: la bitácora "
@@ -1710,11 +1763,13 @@ class FlujoSolicitudPago:
                 "Formulario lleno y sin guardar, listo para tu revisión.",
                 [self.s.captura("llenada")])
 
-        return self.cerrar_solicitud(archivos, hasta=parada)
+        return self.cerrar_solicitud(archivos, hasta=parada,
+                                     solicitud=solicitud)
 
     def cerrar_solicitud(self, archivos: dict[str, str] | None = None, *,
                          hasta: str = "AUTORIZAR",
-                         folio_existente: str = "") -> ResultadoCaptura:
+                         folio_existente: str = "",
+                         solicitud: "Solicitud | None" = None) -> ResultadoCaptura:
         """Guarda el formulario que ya está en pantalla y, si toca, lo autoriza.
 
         Va aparte de `capturar` porque se llega aquí por dos caminos: el normal
@@ -1726,7 +1781,7 @@ class FlujoSolicitudPago:
         archivos = archivos or {}
         # `folio_existente` llega cuando quien revisó ya pulsó Guardar en SIPP:
         # volver a guardar abriría una segunda solicitud para el mismo pago.
-        folio = folio_existente or self.guardar()
+        folio = folio_existente or self.guardar(solicitud)
         if hasta == "GUARDADA":
             return ResultadoCaptura("GUARDADA", folio, "Solicitud guardada.")
 
@@ -1827,7 +1882,8 @@ def _cerrar_tras_revision(flujo, solicitud, docs, i, total, avisar,
     nombre = solicitud.beneficiario_nombre
     try:
         res = flujo.cerrar_solicitud(docs, hasta="AUTORIZAR",
-                                     folio_existente=folio_existente)
+                                     folio_existente=folio_existente,
+                                     solicitud=solicitud)
         db.actualizar_estado(solicitud.id, res.estado,
                              folio_sipp=res.folio_sipp, error_msg="")
         db.registrar(solicitud.id, "capturar", res.mensaje)

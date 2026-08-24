@@ -113,11 +113,12 @@ class _FlujoCierre:
         self.s = type("S", (), {"captura": lambda _self, _n: ""})()
 
     def cerrar_solicitud(self, archivos=None, *, hasta="AUTORIZAR",
-                         folio_existente=""):
+                         folio_existente="", solicitud=None):
         if self.revienta:
             raise RuntimeError("SIPP rechazó el envío")
         self.recibido = {"archivos": archivos, "hasta": hasta,
-                         "folio_existente": folio_existente}
+                         "folio_existente": folio_existente,
+                         "solicitud": solicitud}
         return self.resultado
 
 
@@ -138,6 +139,8 @@ def probar_al_continuar_el_robot_guarda_adjunta_y_autoriza():
     # y sin él la autorización se rechaza.
     assert flujo.recibido["archivos"] == docs
     assert flujo.recibido["hasta"] == "AUTORIZAR"
+    assert flujo.recibido["solicitud"] is s, (
+        "sin la solicitud no se puede comprobar el guardado en el listado")
     recargada = next(x for x in db.listar_solicitudes(lote.id) if x.id == s.id)
     assert recargada.estado == "ENVIADA_AUTORIZAR", recargada.estado
     assert recargada.folio_sipp == "0053196"
