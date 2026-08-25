@@ -20,19 +20,27 @@ from core import credenciales, preferencias
 from core.catalogos import AMBIENTE_DEFECTO, AMBIENTES
 from core.version import __version__
 from ui.comun import GRIS, NARANJA, VERDE
-from ui.componentes import (boton_primario, boton_secundario, campo_opciones,
-                            campo_texto, tarjeta_seccion)
+from ui.componentes import (boton_primario, boton_secundario, campo_texto,
+                            tarjeta_seccion)
 
 _ANCHO = 480
 
-CLAVE_AMBIENTE = "ambiente"
+# La preferencia «ambiente» ya no se lee ni se escribe: la herramienta trabaja
+# siempre contra producción (ver `ambiente_actual`). Los equipos que la tengan
+# guardada de antes la conservan en su archivo, inofensiva.
 CLAVE_VISIBLE = "navegador_visible"
 
 
 def ambiente_actual() -> str:
-    """Ambiente configurado en esta máquina ('PRUEBAS' | 'PRODUCCION')."""
-    valor = preferencias.cargar_valor(CLAVE_AMBIENTE, AMBIENTE_DEFECTO)
-    return valor if valor in AMBIENTES else AMBIENTE_DEFECTO
+    """Ambiente contra el que trabaja la herramienta. Siempre el mismo.
+
+    **No se lee de las preferencias a propósito.** Antes se podía elegir, y esa
+    elección quedaba guardada en el equipo: bastaba con haberla dejado en
+    pruebas una vez para que un lote entero se capturara contra stage sin que
+    nada lo delatara salvo un indicador que ya nadie mira. Devolverlo fijo
+    también corrige de una vez los equipos que quedaron con el valor viejo.
+    """
+    return AMBIENTE_DEFECTO
 
 
 def url_login() -> str:
@@ -78,14 +86,12 @@ class SeccionConfiguracion:
         bl_contrasena, self.tf_contrasena = campo_texto(
             "Contraseña", password=True, expand=True)
 
-        bl_ambiente, self.dd_ambiente = campo_opciones(
-            "Ambiente de SIPP", list(AMBIENTES), valor=ambiente_actual(),
-            on_change=self._cambio_ambiente)
-        self.txt_url = ft.Text(size=12, color=GRIS)
+        self.txt_ambiente = ft.Text(
+            "PRODUCCIÓN", size=15, weight=ft.FontWeight.BOLD, color=NARANJA)
+        self.txt_url = ft.Text(url_login(), size=12, color=GRIS)
         self.txt_aviso_prod = ft.Text(
-            "En producción cada solicitud guardada consume un folio real.",
+            "Cada solicitud que el robot guarde consume un folio real.",
             size=12, color=NARANJA, weight=ft.FontWeight.BOLD)
-        self._refrescar_ambiente()
 
         self.chk_visible = ft.Checkbox(
             label="Mostrar el navegador mientras trabaja el robot",
@@ -103,9 +109,10 @@ class SeccionConfiguracion:
             bl_usuario, bl_contrasena)
         ambiente = self._apartado(
             "Ambiente",
-            "Contra qué instalación de SIPP trabaja el robot. Pruebas (stage) "
-            "para desarrollar y ensayar; producción solo para la corrida real.",
-            bl_ambiente, self.txt_url, self.txt_aviso_prod)
+            "La herramienta trabaja siempre contra la instalación real de SIPP. "
+            "No se puede cambiar desde aquí: poder elegirlo servía sobre todo "
+            "para capturar un lote contra el sitio equivocado.",
+            self.txt_ambiente, self.txt_url, self.txt_aviso_prod)
         navegador = self._apartado(
             "Navegador",
             "En modo visible puedes seguir el trabajo del robot y detectar avisos "
@@ -147,15 +154,6 @@ class SeccionConfiguracion:
         """El modal es de ancho fijo; no requiere reacomodo. Presente por
         consistencia con el registro de listeners del shell."""
 
-    def _refrescar_ambiente(self) -> None:
-        elegido = self.dd_ambiente.value or AMBIENTE_DEFECTO
-        self.txt_url.value = AMBIENTES.get(elegido, "")
-        self.txt_aviso_prod.visible = elegido == "PRODUCCION"
-
-    def _cambio_ambiente(self, _e=None) -> None:
-        self._refrescar_ambiente()
-        self.page.update()
-
     async def _verificar(self, _e=None) -> None:
         """Entra a SIPP y comprueba que el formulario responda, sin capturar nada.
 
@@ -175,7 +173,7 @@ class SeccionConfiguracion:
 
             resultado = await asyncio.to_thread(
                 rpa_sipp.verificar_conexion, usuario, contrasena,
-                url_login=AMBIENTES[self.dd_ambiente.value or AMBIENTE_DEFECTO],
+                url_login=url_login(),
                 visible=bool(self.chk_visible.value))
         except Exception as exc:  # noqa: BLE001 — se reporta, la app sigue viva
             resultado = {"ok": False, "mensaje": f"No se pudo verificar: {exc}"}
@@ -190,8 +188,6 @@ class SeccionConfiguracion:
     def _guardar(self, _e=None) -> None:
         usuario, contrasena = self.credenciales()
         credenciales.guardar(usuario, contrasena)
-        nuevo_ambiente = self.dd_ambiente.value or AMBIENTE_DEFECTO
-        preferencias.guardar_valor(CLAVE_AMBIENTE, nuevo_ambiente)
         preferencias.guardar_valor(CLAVE_VISIBLE, bool(self.chk_visible.value))
         self._cerrar()
         # El shell repinta su indicador: el ambiente tiene que verse siempre,

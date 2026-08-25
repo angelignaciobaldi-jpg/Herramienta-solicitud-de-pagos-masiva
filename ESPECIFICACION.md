@@ -583,11 +583,19 @@ Las URLs de los dos ambientes están en `datos/sipp.json`, no aquí: son el punt
 de entrada al sistema y este repositorio es público. La herramienta las lee al
 arrancar y las muestra en Configuración ⚙.
 
-**El desarrollo y las pruebas se hacen contra stage.** El ambiente se elige en
-Configuración y se muestra de forma permanente y visible en el encabezado: una
-franja de advertencia cuando se está en producción. Diferencias conocidas de
-stage: el catálogo de conceptos de pago no es el mismo que en producción, y la
-subida de archivos falla de forma intermitente.
+**La aplicación instalada trabaja siempre contra producción y no ofrece
+cambiarlo.** Poder elegir servía sobre todo para equivocarse: la elección se
+guardaba en el equipo, así que haberla dejado en pruebas una vez bastaba para
+capturar un lote entero contra stage sin que nada lo delatara salvo un
+indicador que ya nadie mira. El encabezado sigue mostrando la franja de
+producción —cada solicitud guardada consume un folio real y eso no debe poder
+olvidarse— y Configuración enseña la URL, para poder comprobar contra dónde se
+trabaja aunque no se pueda cambiar.
+
+**El desarrollo y las pruebas se hacen contra stage**, desde los scripts de
+`scripts/`, que sí reciben el ambiente. Diferencias conocidas de stage: el
+catálogo de conceptos de pago no es el mismo que en producción, y la subida de
+archivos falla de forma intermitente.
 
 ### Lo verificado contra stage
 
@@ -699,7 +707,7 @@ navegación horizontal en el encabezado, fechas siempre por `comun.CampoFecha`.
 | Documentos | Carga por arrastre, archivo o carpeta. Emparejamiento PDF/XML y de carátulas/Vo.Bo. |
 | Conceptos | Catálogo de conceptos de pago: importación desde SIPP y alta manual |
 | Bitácora | Historial por solicitud, capturas de pantalla, exportación |
-| Configuración | Credenciales, ambiente, modo visible/headless, verificación de conexión, versión |
+| Configuración | Credenciales, modo visible/headless, verificación de conexión, versión. El ambiente se muestra, no se elige |
 
 ### Tabla de solicitudes
 
