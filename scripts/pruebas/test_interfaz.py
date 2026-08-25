@@ -72,7 +72,7 @@ def probar_solicitudes_crea_lote_y_da_de_alta():
         tipo_beneficiario="Acreedor", beneficiario_nombre="ANA LOPEZ",
         beneficiario_rfc="XAXX010101000", cuenta_clabe="012345678901234568",
         cuenta_banco="BBVA", forma_pago="Transferencia",
-        tipo_gasto="No Deducible", fecha_pago="20/09/2026")
+        tipo_gasto="No Deducible", fecha_pago=comun.fecha_futura())
     pantalla._recibir_solicitud(solicitud, [comun.concepto("VIGILANCIA", 1200.0)])
     assert len(pantalla._solicitudes) == 1
     assert "1 solicitud" in pantalla.txt_resumen.value
@@ -377,13 +377,13 @@ def _excel_de_prueba(carpeta: str) -> str:
              tipo_beneficiario="Acreedor", beneficiario_nombre="ANA LOPEZ RUIZ",
              beneficiario_rfc="XAXX010101000", forma_pago="Transferencia",
              tipo_gasto="No Deducible", cuenta_banco="BBVA",
-             cuenta_clabe="012345678901234568", fecha_pago="15/09/2026",
+             cuenta_clabe="012345678901234568", fecha_pago=comun.fecha_futura(),
              concepto_nombre="VIGILANCIA", importe="9500"),
         fila(empresa="Abastecedora", sucursal="Corporativo",
              tipo_beneficiario="Acreedor", beneficiario_nombre="LUIS DIAZ MORA",
              beneficiario_rfc="XAXX010101000", forma_pago="Transferencia",
              tipo_gasto="No Deducible", cuenta_banco="BBVA",
-             cuenta_clabe="012345678901234568", fecha_pago="15/09/2026",
+             cuenta_clabe="012345678901234568", fecha_pago=comun.fecha_futura(),
              concepto_nombre="VIGILANCIA", importe="7200"),
         # Sin empresa y con CLABE corta: debe salir marcada.
         fila(sucursal="Corporativo", tipo_beneficiario="Acreedor",
@@ -1041,3 +1041,76 @@ def probar_alta_manual_de_concepto_avisa_de_soporte():
     pantalla.tf_nombre.value = "concepto nuevo"
     pantalla._guardar_alta()
     assert pantalla.txt_error_alta.visible
+
+
+def probar_los_documentos_adjuntos_se_ven_al_guardar_sin_replegar():
+    """la tabla refleja la carátula recién adjuntada, sin tocar la fila"""
+    # El fallo reportado: se adjuntaba la carátula, se guardaba, y la fila
+    # seguía diciendo «FALTA LA CARÁTULA» hasta plegar y desplegar el detalle.
+    # La causa era el orden: se repintaba ANTES de registrar los documentos.
+    from ui.solicitudes import SeccionSolicitudes
+
+    carpeta = comun.carpeta_temporal()
+    caratula = comun.pdf_falso(carpeta, "CARATULA ANA LOPEZ.pdf")
+
+    app = comun.AppFalsa()
+    pantalla = SeccionSolicitudes(app)
+    pantalla.cargar_desde_db()
+
+    s = db.Solicitud(
+        lote_id=pantalla._lote.id, empresa="Abastecedora",
+        sucursal="Corporativo", tipo_beneficiario="Acreedor",
+        beneficiario_nombre="ANA LOPEZ", beneficiario_rfc="XAXX010101000",
+        cuenta_clabe="012345678901234568", cuenta_banco="BBVA",
+        forma_pago="Transferencia", tipo_gasto="No Deducible",
+        fecha_pago=comun.fecha_futura(), moneda="Pesos (MXN)", estado="VALIDADA")
+    partidas = [comun.concepto("PAGO PTU", 100.0)]
+
+    # Tal como lo entrega el modal: solicitud, partidas y sus archivos juntos.
+    pantalla._recibir_solicitud(s, partidas, {documentos.TIPO_CARATULA: caratula})
+
+    guardada = db.listar_documentos(solicitud_id=s.id)
+    assert guardada, "la carátula debió quedar registrada"
+
+    # Y la tabla ya la ve: sin este orden, `de_solicitud` devolvía vacío al
+    # pintar y la fila anunciaba que faltaba.
+    assert documentos.de_solicitud(s.id).get("caratula"), (
+        "la tabla se pinta leyendo esto; si está vacío, dirá que falta")
+
+
+def probar_lo_importado_hereda_la_parada_del_lote():
+    """con el lote en «Guardar y autorizar», nada nace en «Llenar y esperar»"""
+    # El fallo reportado: se configuraba el lote para guardar y autorizar, pero
+    # las solicitudes creadas desde caratulas o Excel nacian con la parada fija
+    # del adaptador y el robot se detenia a pedir revision.
+    from core.adaptadores import caratulas
+
+    carpeta = comun.carpeta_temporal()
+    comun.pdf_falso(carpeta, "CARATULA ANA LOPEZ.pdf")
+
+    borradores = caratulas.crear_borradores([carpeta], "lote-x",
+                                            parada="AUTORIZAR",
+                                            leer_caratula=False)
+    assert borradores, "debio crear un borrador"
+    assert all(b.solicitud.parada == "AUTORIZAR" for b in borradores), (
+        [b.solicitud.parada for b in borradores])
+
+
+def probar_el_modal_de_caratulas_recibe_la_parada_al_abrirse():
+    """la pantalla se la pasa; sin eso el adaptador usa su valor fijo"""
+    from ui.alta_caratulas import AltaDesdeCaratulas
+
+    app = comun.AppFalsa()
+    modal = AltaDesdeCaratulas(app, lambda *_a: None)
+    modal.abrir(comun.lote().id, parada="AUTORIZAR")
+    assert modal._parada == "AUTORIZAR"
+
+
+def probar_el_modal_de_excel_recibe_la_parada_al_abrirse():
+    """igual para la carga masiva"""
+    from ui.carga_masiva import CargaMasiva
+
+    app = comun.AppFalsa()
+    modal = CargaMasiva(app, lambda *_a: None)
+    modal.abrir(comun.lote().id, parada="GUARDADA")
+    assert modal._parada == "GUARDADA"

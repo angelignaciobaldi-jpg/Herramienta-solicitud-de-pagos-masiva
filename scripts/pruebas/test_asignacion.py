@@ -39,8 +39,9 @@ def probar_se_reasignan_empresa_sucursal_y_fecha_sin_tocar_el_desglose():
     lote, ana, *_ = _lote_con_cfdi()
     antes = len(db.listar_partidas(ana.id))
 
+    nueva_fecha = comun.fecha_futura(45)
     plan = asignacion.calcular(lote.id, empresa="Abastecedora",
-                               sucursal="Corporativo", fecha_pago="30/09/2026")
+                               sucursal="Corporativo", fecha_pago=nueva_fecha)
     assert not plan.error, plan.error
     assert plan.cambios
     asignacion.aplicar(lote.id, plan)
@@ -48,18 +49,21 @@ def probar_se_reasignan_empresa_sucursal_y_fecha_sin_tocar_el_desglose():
     recargada = next(s for s in db.listar_solicitudes(lote.id) if s.id == ana.id)
     assert recargada.empresa == "Abastecedora"
     assert recargada.sucursal == "Corporativo"
-    assert recargada.fecha_pago == "30/09/2026"
+    assert recargada.fecha_pago == nueva_fecha
     assert len(db.listar_partidas(ana.id)) == antes, "no debió tocar el desglose"
 
 
 def probar_la_cabecera_sobrescribe_lo_que_ya_habia():
     """reasignar es sustituir: si no, habría que vaciar campo por campo"""
     lote = comun.lote()
-    s = comun.solicitud(lote.id, "ANA LOPEZ", fecha_pago="01/01/2026")
-    plan = asignacion.calcular(lote.id, fecha_pago="30/09/2026")
+    # Dos fechas DISTINTAS, las dos válidas: la segunda tiene que pisar a la
+    # primera, que es lo que significa reasignar.
+    s = comun.solicitud(lote.id, "ANA LOPEZ", fecha_pago=comun.fecha_futura(10))
+    otra = comun.fecha_futura(60)
+    plan = asignacion.calcular(lote.id, fecha_pago=otra)
     asignacion.aplicar(lote.id, plan)
     recargada = next(x for x in db.listar_solicitudes(lote.id) if x.id == s.id)
-    assert recargada.fecha_pago == "30/09/2026", recargada.fecha_pago
+    assert recargada.fecha_pago == otra, recargada.fecha_pago
 
 
 def probar_sin_concepto_ni_cabecera_no_hay_nada_que_asignar():

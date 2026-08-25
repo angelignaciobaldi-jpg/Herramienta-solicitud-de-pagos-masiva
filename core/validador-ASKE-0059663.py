@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from datetime import date, datetime
 
 from core import catalogos
 from core.db import CONCEPTO, INSUMO, Partida, Solicitud, total_desglose
@@ -43,7 +42,6 @@ AVISO = "AVISO"
 # distinguir un problema concreto SIN mirar el texto del mensaje, que está
 # escrito para leerse y puede reescribirse en cualquier momento.
 IMPORTE_EN_CERO = "importe_en_cero"
-FECHA_VENCIDA = "fecha_vencida"
 
 
 @dataclass
@@ -58,19 +56,6 @@ class Hallazgo:
     @property
     def es_error(self) -> bool:
         return self.severidad == ERROR
-
-
-def fecha_vencida(texto: str, hoy: "date | None" = None) -> bool:
-    """True si la fecha de pago es ANTERIOR a hoy. Hoy mismo es válido.
-
-    `hoy` se puede fijar desde fuera para poder probar esto sin depender del
-    día en que se corran las pruebas.
-    """
-    try:
-        fecha = datetime.strptime((texto or "").strip(), "%d/%m/%Y").date()
-    except ValueError:
-        return False          # el formato ya lo reporta quien llama
-    return fecha < (hoy or date.today())
 
 
 def clabe_valida(clabe: str) -> bool:
@@ -187,14 +172,6 @@ def validar(solicitud: Solicitud, partidas: list[Partida]) -> list[Hallazgo]:
         h.append(Hallazgo("fecha_pago", "Falta la fecha de pago."))
     elif not _FECHA.match(solicitud.fecha_pago):
         h.append(Hallazgo("fecha_pago", "La fecha debe ir como DD/MM/AAAA."))
-    elif fecha_vencida(solicitud.fecha_pago):
-        # Una fecha ya pasada no es un descuido menor: SIPP la acepta y el pago
-        # queda registrado con fecha anterior a su captura. Se marca como ERROR
-        # para que el motor la mande a REVISAR y no llegue al portal.
-        h.append(Hallazgo(
-            "fecha_pago",
-            f"La fecha de pago ({solicitud.fecha_pago}) ya pasó. Actualízala "
-            f"antes de capturar.", codigo=FECHA_VENCIDA))
     if solicitud.moneda not in catalogos.MONEDAS:
         h.append(Hallazgo("moneda", "Falta la moneda."))
     elif (solicitud.moneda != catalogos.MONEDA_DEFECTO

@@ -165,8 +165,14 @@ class _EditorPartidas:
 
 
 class CapturaSolicitud:
-    """Modal de alta/edición. `al_guardar(solicitud, partidas)` recibe el
-    resultado; guardar en la base es responsabilidad de quien lo abre."""
+    """Modal de alta/edición.
+
+    `al_guardar(solicitud, partidas, archivos)` recibe el resultado; guardar en
+    la base es responsabilidad de quien lo abre. Los archivos van en la MISMA
+    llamada y no aparte: cuelgan de la solicitud, así que solo se pueden
+    registrar cuando su fila existe, y quien repinta tiene que hacerlo después
+    de eso o la tabla mostrará documentos que ya se adjuntaron como faltantes.
+    """
 
     def __init__(self, app, al_guardar) -> None:
         self.app = app
@@ -503,8 +509,9 @@ class CapturaSolicitud:
         # Sin errores: la solicitud queda lista para encolarse.
         solicitud.estado = "VALIDADA"
         self.modal.cerrar()
-        self._al_guardar(solicitud, partidas)
-        # Los archivos se registran DESPUÉS de guardar la solicitud: necesitan
-        # que su fila exista para colgar de ella.
-        for tipo, ruta in self._archivos.items():
-            documentos.registrar(solicitud.id, ruta, tipo, solicitud.lote_id)
+        # Los archivos van JUNTO con la solicitud, no después: quien recibe esto
+        # los registra una vez que la fila existe —cuelgan de ella— y repinta
+        # ya con todo puesto. Registrarlos aquí, tras `_al_guardar`, dejaba la
+        # tabla dibujada con los documentos todavía sin guardar: seguía diciendo
+        # «FALTA LA CARÁTULA» hasta que alguien plegaba y desplegaba la fila.
+        self._al_guardar(solicitud, partidas, dict(self._archivos))

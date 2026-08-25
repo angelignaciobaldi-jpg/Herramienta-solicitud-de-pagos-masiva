@@ -113,11 +113,12 @@ class _FlujoCierre:
         self.s = type("S", (), {"captura": lambda _self, _n: ""})()
 
     def cerrar_solicitud(self, archivos=None, *, hasta="AUTORIZAR",
-                         folio_existente=""):
+                         folio_existente="", solicitud=None):
         if self.revienta:
             raise RuntimeError("SIPP rechazó el envío")
         self.recibido = {"archivos": archivos, "hasta": hasta,
-                         "folio_existente": folio_existente}
+                         "folio_existente": folio_existente,
+                         "solicitud": solicitud}
         return self.resultado
 
 
@@ -138,6 +139,8 @@ def probar_al_continuar_el_robot_guarda_adjunta_y_autoriza():
     # y sin él la autorización se rechaza.
     assert flujo.recibido["archivos"] == docs
     assert flujo.recibido["hasta"] == "AUTORIZAR"
+    assert flujo.recibido["solicitud"] is s, (
+        "sin la solicitud no se puede comprobar el guardado en el listado")
     recargada = next(x for x in db.listar_solicitudes(lote.id) if x.id == s.id)
     assert recargada.estado == "ENVIADA_AUTORIZAR", recargada.estado
     assert recargada.folio_sipp == "0053196"
@@ -185,10 +188,11 @@ class _PaginaFalsa:
         self.esperado_ms += ms
 
 
-def _sesion_con_pagina(pagina):
+def _sesion_con_pagina(pagina, cancelado=None):
     """Una SesionSipp sin abrir nada, con la página sustituida."""
     sesion = rpa_sipp.SesionSipp.__new__(rpa_sipp.SesionSipp)
     sesion.page = pagina
+    sesion.cancelado = cancelado
     return sesion
 
 
@@ -264,23 +268,43 @@ def probar_detener_corta_la_captura_en_curso():
     """el flujo se aborta entre pasos, no al terminar la solicitud"""
     # Antes, «Detener» esperaba a que la solicitud en curso terminara. Con un
     # dato malo detectado a media corrida, eso significa capturarlo igual.
-    sesion = object()
     detener = {"si": False}
+    sesion = _sesion_con_pagina(_PaginaFalsa())
     flujo = rpa_sipp.FlujoSolicitudPago(sesion, cancelado=lambda: detener["si"])
+    # El flujo lo guarda en la SESIÓN: sus esperas y reintentos son los tramos
+    # largos y también tienen que poder cortarse.
+    assert callable(sesion.cancelado)
 
     flujo.abortar_si_cancelan()          # sin pedir parada, no hace nada
     detener["si"] = True
-    try:
-        flujo.abortar_si_cancelan()
-        assert False, "debió cortar"
-    except rpa_sipp.Cancelado:
-        pass
+    for quien in (flujo, sesion):        # los dos cortan, con el mismo aviso
+        try:
+            quien.abortar_si_cancelan()
+            assert False, "debió cortar"
+        except rpa_sipp.Cancelado:
+            pass
 
 
 def probar_sin_callback_de_cancelacion_nunca_se_corta():
     """el flujo de verificación no tiene nada que cancelar"""
-    flujo = rpa_sipp.FlujoSolicitudPago(object())
+    flujo = rpa_sipp.FlujoSolicitudPago(_sesion_con_pagina(_PaginaFalsa()))
     flujo.abortar_si_cancelan()
+
+
+def probar_los_reintentos_dejan_de_esperar_si_se_pide_parar():
+    """el sondeo corta a media espera, no al agotar su tope"""
+    # Era el fallo reportado: «Detener» no hacía nada porque los bucles de
+    # reintento —hasta cuatro vueltas con esperas de 60 s— no lo consultaban,
+    # y la ventana parecía congelada.
+    pagina = _PaginaFalsa()
+    sesion = _sesion_con_pagina(pagina, cancelado=lambda: True)
+    try:
+        sesion.esperar_a(lambda: False, tope_ms=60000, intervalo_ms=100)
+        assert False, "debió cortar"
+    except rpa_sipp.Cancelado:
+        pass
+    assert pagina.esperado_ms == 0, (
+        f"esperó {pagina.esperado_ms} ms tras pedirle parar")
 
 
 def probar_la_solicitud_cortada_vuelve_a_su_estado_anterior():
@@ -378,7 +402,7 @@ def _flujo_con(sesion):
 def probar_la_fecha_se_escribe_una_sola_vez_si_se_queda():
     """en el caso normal no se repite trabajo"""
     ses = _SesionFecha(borrados=0)
-    s = comun.solicitud(comun.lote().id, "ANA LOPEZ", fecha_pago="30/09/2026")
+    s = comun.solicitud(comun.lote().id, "ANA LOPEZ", fecha_pago=comun.fecha_futura())
     _flujo_con(ses)._poner_fecha(s)
     assert ses.escrituras == 1
     assert not ses.avisos
@@ -389,7 +413,7 @@ def probar_si_el_grid_borra_la_fecha_se_reintenta():
     # Es el fallo reportado: al elegir el concepto, SIPP borraba la fecha y el
     # Guardar no confirmaba nada, sin decir por qué.
     ses = _SesionFecha(borrados=1)
-    s = comun.solicitud(comun.lote().id, "ANA LOPEZ", fecha_pago="30/09/2026")
+    s = comun.solicitud(comun.lote().id, "ANA LOPEZ", fecha_pago=comun.fecha_futura())
     _flujo_con(ses)._poner_fecha(s)
     assert ses.escrituras == 2, "debió reintentar"
     assert any("se borró" in a for a in ses.avisos), "y dejar constancia"
@@ -398,7 +422,7 @@ def probar_si_el_grid_borra_la_fecha_se_reintenta():
 def probar_si_la_fecha_nunca_se_queda_se_falla_con_el_motivo():
     """no se guarda una solicitud sin fecha: SIPP la rechaza en silencio"""
     ses = _SesionFecha(borrados=9)
-    s = comun.solicitud(comun.lote().id, "ANA LOPEZ", fecha_pago="30/09/2026")
+    s = comun.solicitud(comun.lote().id, "ANA LOPEZ", fecha_pago=comun.fecha_futura())
     try:
         _flujo_con(ses)._poner_fecha(s)
         assert False, "debió fallar"
@@ -422,3 +446,111 @@ def probar_la_fecha_es_el_ultimo_paso_del_llenado():
     pos_desglose = fuente.index("_llenar_conceptos")
     pos_fecha = fuente.index("_poner_fecha")
     assert pos_fecha > pos_desglose, "la fecha debe ir DESPUÉS del desglose"
+
+
+def probar_el_scroll_al_campo_va_fuera_del_bucle_de_reintentos():
+    """el robot no sube y baja la página en cada intento"""
+    # Reportado: al elegir «Tipo de Pago Extraordinario» —una lista dependiente
+    # que tarda en llenarse— la página subía y bajaba varias veces. Era el
+    # `scroll_into_view` de cada reintento; el campo no se mueve entre ellos.
+    import inspect
+    fuente = inspect.getsource(rpa_sipp.SesionSipp.seleccionar_chosen)
+    pos_scroll = fuente.index("scroll_into_view_if_needed")
+    pos_bucle = fuente.index("for intento in range")
+    assert pos_scroll < pos_bucle, "el scroll debe ir ANTES del bucle"
+    assert fuente.count("scroll_into_view_if_needed") == 1, (
+        "solo debe quedar un scroll, fuera del bucle")
+
+
+def probar_se_espera_a_que_el_widget_tenga_opciones_antes_de_teclear():
+    """escribir sobre una lista vacía desperdicia el intento entero"""
+    # Chosen se puebla cuando Angular dispara `chosen:updated`: puede haber
+    # opciones en el <select> y ninguna todavía en el widget.
+    import inspect
+    fuente = inspect.getsource(rpa_sipp.SesionSipp.seleccionar_chosen)
+    pos_espera = fuente.index("li.active-result\").count() > 0")
+    pos_teclea = fuente.index("buscador.type(")
+    assert pos_espera < pos_teclea, "hay que esperar ANTES de teclear"
+
+
+# --------------------------------------------------------------------------- #
+#  Al terminar, el portal queda en el listado general
+# --------------------------------------------------------------------------- #
+class _SesionListado:
+    """Doble de sesión que anota qué filtros se vaciaron y si se buscó."""
+
+    def __init__(self, con_filtros=True, revienta=False):
+        self.con_filtros = con_filtros
+        self.revienta = revienta
+        self.vaciados = []
+        self.busco = False
+        self.avisos = []
+        self.quieto = 0
+
+    def existe(self, clave):
+        return self.con_filtros or clave == "listado.buscar"
+
+    def loc(self, clave):
+        ses = self
+
+        class _L:
+            @property
+            def first(self):
+                return self
+
+            def fill(self, valor):
+                assert valor == "", "los filtros se VACIAN"
+                ses.vaciados.append(clave)
+
+            def click(self):
+                ses.busco = True
+
+        return _L()
+
+    def esperar_quieto(self, ms):
+        self.quieto += ms
+
+    def anotar(self, _paso, mensaje, _nivel=None):
+        self.avisos.append(mensaje)
+
+
+def _flujo_listado(sesion, volver_revienta=False):
+    flujo = rpa_sipp.FlujoSolicitudPago(sesion)
+    if volver_revienta:
+        def _boom():
+            raise RuntimeError("el formulario no responde")
+        flujo.volver_al_listado = _boom
+    else:
+        flujo.volver_al_listado = lambda: None
+    return flujo
+
+
+def probar_al_terminar_se_vacian_los_filtros_del_listado():
+    """el listado conserva el filtro de la busqueda de duplicados"""
+    # Sin limpiarlo se ve UNA fila —la del ultimo beneficiario buscado— o
+    # ninguna, y parece que el lote no capturo nada.
+    ses = _SesionListado()
+    _flujo_listado(ses).dejar_listado_limpio()
+
+    assert "listado.filtro_beneficiario" in ses.vaciados
+    assert "listado.filtro_descripcion" in ses.vaciados
+    assert "listado.filtro_desde" in ses.vaciados
+    assert "listado.filtro_hasta" in ses.vaciados
+    assert ses.busco, "hay que volver a buscar para que el listado se recargue"
+
+
+def probar_un_fallo_al_limpiar_el_listado_no_rompe_nada():
+    """es cortesia: el lote ya termino y su resultado no depende de esto"""
+    ses = _SesionListado(revienta=True)
+    _flujo_listado(ses, volver_revienta=True).dejar_listado_limpio()
+    assert any("No se pudo dejar el listado" in a for a in ses.avisos)
+
+
+def probar_llenar_y_esperar_no_navega_al_listado():
+    """con el formulario lleno en pantalla, navegar lo perderia"""
+    # La regla del motor: solo se vuelve al listado si la ultima solicitud NO
+    # quedo llena y sin guardar.
+    import inspect
+    fuente = inspect.getsource(rpa_sipp.procesar_lote)
+    assert 'if ultimo_estado != "LLENADA":' in fuente
+    assert "dejar_listado_limpio()" in fuente

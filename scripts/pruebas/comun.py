@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import tempfile
+from datetime import date, timedelta
 
 from core import db
 from core.db import CONCEPTO, INSUMO, Lote, Partida, Solicitud
@@ -34,6 +35,20 @@ def base_limpia() -> str:
     return ruta
 
 
+# --- Fechas de prueba ------------------------------------------------------
+# El validador rechaza una fecha de pago ANTERIOR a hoy, asi que las pruebas no
+# pueden llevar fechas escritas a mano: el dia que pasan, la suite entera
+# empieza a fallar sin que nadie haya cambiado codigo. Se calculan al correr.
+def fecha_futura(dias: int = 30) -> str:
+    """Una fecha de pago valida, siempre por delante de hoy."""
+    return (date.today() + timedelta(days=dias)).strftime("%d/%m/%Y")
+
+
+def fecha_pasada(dias: int = 1) -> str:
+    """Una fecha de pago vencida, para probar que se rechaza."""
+    return (date.today() - timedelta(days=dias)).strftime("%d/%m/%Y")
+
+
 def carpeta_temporal() -> str:
     return tempfile.mkdtemp()
 
@@ -56,7 +71,7 @@ def solicitud(lote_id: str, nombre: str, *, tipo: str = "Acreedor",
         beneficiario_correo="prueba@ejemplo.invalid",
         cuenta_clabe="012345678901234568", cuenta_banco="BBVA",
         cuenta_titular=nombre, forma_pago="Transferencia",
-        tipo_gasto="No Deducible", fecha_pago="20/09/2026",
+        tipo_gasto="No Deducible", fecha_pago=fecha_futura(),
         descripcion=f"Pago a {nombre}", estado=estado)
     datos.update(extra)
     return db.guardar_solicitud(Solicitud(**datos), partidas or [])

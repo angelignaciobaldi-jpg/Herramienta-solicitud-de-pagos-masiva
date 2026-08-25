@@ -54,7 +54,22 @@ jobs:
           $env:SIPP_DATOS_JSON | Out-File -FilePath datos/sipp.json -Encoding utf8
           # Se valida que sea JSON y traiga lo mínimo: un secreto mal pegado
           # produciría un instalador roto que solo falla en el equipo del usuario.
-          $datos = Get-Content datos/sipp.json -Raw | ConvertFrom-Json
+          #
+          # Antes de parsear se comprueba que EMPIECE por '{'. El error de
+          # ConvertFrom-Json ("Unexpected character ... Path '', line 0") no
+          # dice qué se pegó, y el fallo típico no es un JSON roto: es haber
+          # pegado otra cosa —el comando que copiaba el archivo, por ejemplo—.
+          # NUNCA se imprime el contenido: iría al log de Actions.
+          $crudo = (Get-Content datos/sipp.json -Raw)
+          if (-not $crudo.TrimStart().StartsWith("{")) {
+            $inicio = $crudo.TrimStart()
+            $pista = $inicio.Substring(0, [Math]::Min(1, $inicio.Length))
+            Write-Error ("El secreto SIPP_DATOS_JSON no contiene un JSON: " +
+              "empieza por '$pista' y debería empezar por '{'. Pega el " +
+              "CONTENIDO de datos/sipp.json, no la ruta ni el comando que lo lee.")
+            exit 1
+          }
+          $datos = $crudo | ConvertFrom-Json
           if (-not $datos.selectores -or -not $datos.ambientes) {
             Write-Error "datos/sipp.json no trae 'selectores' y 'ambientes'."
             exit 1
