@@ -1114,3 +1114,36 @@ def probar_el_modal_de_excel_recibe_la_parada_al_abrirse():
     modal = CargaMasiva(app, lambda *_a: None)
     modal.abrir(comun.lote().id, parada="GUARDADA")
     assert modal._parada == "GUARDADA"
+
+
+# --------------------------------------------------------------------------- #
+#  El aviso de ejecución no se puede quedar colgado
+# --------------------------------------------------------------------------- #
+def _cuerpo_de(nombre: str) -> str:
+    """El código de una función anidada de `ui.solicitudes`, como texto."""
+    import inspect
+
+    from ui import solicitudes
+
+    fuente = inspect.getsource(solicitudes)
+    ini = fuente.index(f"def {nombre}(")
+    return fuente[ini:fuente.index("dialogo.update()", ini)]
+
+
+def probar_detener_despierta_las_dos_esperas_del_motor():
+    """el motor duerme en dos sitios y Detener tiene que valer en los dos"""
+    # Reportado: al terminar el lote, el aviso se quedaba en pantalla sin
+    # avanzar y el reporte final no llegaba. El motor estaba dormido esperando
+    # a que se cerrara el navegador, y Detener solo despertaba la otra espera
+    # —la de la revisión—, así que el hilo no volvía nunca.
+    cuerpo = _cuerpo_de("cancelar")
+    assert "pausa.set()" in cuerpo, "la espera de la revisión"
+    assert "cierre.set()" in cuerpo, (
+        "y la del cierre del navegador, o el aviso se queda colgado")
+
+
+def probar_cerrar_el_navegador_acusa_recibo():
+    """matar Chromium tarda: sin acuse, parece que el botón no hizo nada"""
+    cuerpo = _cuerpo_de("cerrar_navegador")
+    assert "Cerrando" in cuerpo
+    assert "disabled = True" in cuerpo, "y no se puede pulsar dos veces"

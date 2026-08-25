@@ -8,6 +8,7 @@ la base cuente la verdad. Lo que necesita el portal se prueba con los
 
 from __future__ import annotations
 
+import os
 import threading
 
 from core import db, rpa_sipp
@@ -374,25 +375,38 @@ def probar_si_ya_esta_elegido_no_se_toca_el_combo():
 #  La fecha de pago se escribe al final
 # --------------------------------------------------------------------------- #
 class _SesionFecha:
-    """Doble de sesión que imita al portal borrando la fecha n veces."""
+    """Doble de sesión que imita al portal descartando la fecha n veces.
+
+    El doble distingue lo que se ve de lo que SIPP REGISTRA, porque esa es
+    justamente la diferencia que dejaba pasar solicitudes sin fecha: el campo
+    mostraba el día escrito y el modelo del portal estaba vacío.
+    """
 
     def __init__(self, borrados=0):
         self.borrados = borrados
         self.escrituras = 0
         self.avisos = []
+        self.capturas = []
+        self.registrada = ""
         self.page = type("P", (), {"wait_for_timeout": lambda _s, _ms: None})()
 
     def llenar(self, _clave, texto, _desc, **_kw):
         self.escrituras += 1
-        self.valor = "" if self.escrituras <= self.borrados else texto
+        # Se escribe siempre; lo que cambia es si el portal se da por enterado.
+        self.registrada = "" if self.escrituras <= self.borrados else texto
 
-    def loc(self, _clave):
-        valor = self.valor
-        return type("L", (), {"first": type("F", (), {
-            "input_value": lambda _s: valor})()})()
+    def consultar(self, _nombre, defecto=None):
+        return self.registrada or defecto
+
+    def esperar_a(self, condicion, tope_ms=0, intervalo_ms=0):
+        return bool(condicion())
 
     def anotar(self, _paso, mensaje, _nivel=None):
         self.avisos.append(mensaje)
+
+    def captura(self, nombre):
+        self.capturas.append(nombre)
+        return ""
 
 
 def _flujo_con(sesion):
@@ -416,7 +430,7 @@ def probar_si_el_grid_borra_la_fecha_se_reintenta():
     s = comun.solicitud(comun.lote().id, "ANA LOPEZ", fecha_pago=comun.fecha_futura())
     _flujo_con(ses)._poner_fecha(s)
     assert ses.escrituras == 2, "debió reintentar"
-    assert any("se borró" in a for a in ses.avisos), "y dejar constancia"
+    assert any("no registró" in a for a in ses.avisos), "y dejar constancia"
 
 
 def probar_si_la_fecha_nunca_se_queda_se_falla_con_el_motivo():
@@ -554,3 +568,301 @@ def probar_llenar_y_esperar_no_navega_al_listado():
     fuente = inspect.getsource(rpa_sipp.procesar_lote)
     assert 'if ultimo_estado != "LLENADA":' in fuente
     assert "dejar_listado_limpio()" in fuente
+
+
+# --------------------------------------------------------------------------- #
+#  Los rechazos silenciosos del portal
+# --------------------------------------------------------------------------- #
+# SIPP rechaza un formulario de dos maneras y solo una se ve. Además de las
+# alertas emergentes, valida campo por campo con un mensaje pegado al campo y
+# se detiene ahí: sin alerta, sin diálogo y sin llamar a su servidor. Visto
+# desde fuera es idéntico a «el botón no hizo nada», y así estuvo el robot
+# esperando veinte segundos un folio que no iba a llegar, para acabar diciendo
+# que SIPP no había confirmado.
+class _SesionGuardar:
+    """Doble de sesión que contesta al Guardar como lo hace el portal."""
+
+    def __init__(self, objecion="", folio="", autorizar=False):
+        self.objecion = objecion
+        self.pendiente = ""     # el portal objeta AL PULSAR, no antes
+        self.folio = folio
+        self.autorizar = autorizar
+        self.avisos = []
+        self.capturas = []
+        self.espiado = 0
+        self.clics = []
+        self.page = type("P", (), {"wait_for_timeout": lambda _s, _ms: None})()
+
+    # --- lo que el motor usa de la sesión ---
+    def espiar_validaciones(self):
+        self.espiado += 1
+
+    def validaciones(self):
+        # Igual que en el portal: se entrega una vez y la lista queda limpia.
+        pendiente, self.pendiente = self.pendiente, ""
+        return [pendiente] if pendiente else []
+
+    def esperar_a(self, condicion, tope_ms=0, intervalo_ms=0):
+        return bool(condicion())
+
+    def clic_con_reintento(self, clave, _desc):
+        self.clics.append(clave)
+        if clave == "acc.guardar":
+            self.pendiente = self.objecion
+
+    def visible_(self, clave):
+        return clave == "acc.autorizar" and self.autorizar
+
+    def loc(self, _clave):
+        vacio = type("L", (), {"count": lambda _s: 0})()
+        return type("W", (), {"first": vacio})()
+
+    def texto_alertas(self):
+        return ""
+
+    def cerrar_alertas(self, vueltas=6):
+        pass
+
+    def esperar_quieto(self, _tope):
+        pass
+
+    def hay_error_sistema(self):
+        return False
+
+    def anotar(self, _paso, mensaje, _nivel=None):
+        self.avisos.append(mensaje)
+
+    def captura(self, nombre):
+        self.capturas.append(nombre)
+        return nombre
+
+    def diagnostico(self, nombre):
+        self.capturas.append(nombre)
+
+
+def _flujo_guardar(sesion, folio=""):
+    flujo = rpa_sipp.FlujoSolicitudPago(sesion)
+    flujo._leer_folio = lambda: folio
+    return flujo
+
+
+def probar_lo_que_sipp_objeta_se_reporta_tal_cual():
+    """el motivo del rechazo lo dice SIPP: hay que leerlo, no adivinarlo"""
+    ses = _SesionGuardar(objecion="La información de la Fecha Pago es requerida.")
+    try:
+        _flujo_guardar(ses).guardar()
+        assert False, "debió detenerse"
+    except rpa_sipp.RequiereRevision as exc:
+        assert "Fecha Pago" in str(exc), "el mensaje del portal, textual"
+
+
+def probar_un_rechazo_no_se_reintenta_como_si_fuera_una_falla():
+    """es un dato que no cuadra: repetirlo da exactamente el mismo rechazo"""
+    ses = _SesionGuardar(objecion="Es necesario capturar el RFC")
+    try:
+        _flujo_guardar(ses).guardar()
+        assert False, "debió detenerse"
+    except rpa_sipp.RequiereRevision:
+        pass
+    except rpa_sipp.ErrorRpa:
+        assert False, "un rechazo del portal no es una falla del robot"
+
+
+def probar_no_se_espera_un_folio_que_ya_no_va_a_llegar():
+    """cortar en cuanto SIPP objeta es la diferencia entre explicar y colgarse"""
+    ses = _SesionGuardar(objecion="La información de la Empresa es requerida.")
+    try:
+        _flujo_guardar(ses).guardar()
+    except rpa_sipp.RequiereRevision:
+        pass
+    assert "acc.autorizar" not in ses.clics
+    assert ses.espiado >= 1, "hay que estar escuchando ANTES de pulsar Guardar"
+
+
+def probar_sin_objeciones_el_guardado_sigue_su_curso():
+    """el camino normal no cambia: si SIPP no objeta, se guarda"""
+    ses = _SesionGuardar(folio="3810", autorizar=True)
+    assert _flujo_guardar(ses, folio="3810").guardar() == "3810"
+
+
+def probar_lo_objetado_al_llenar_no_se_arrastra_al_guardar():
+    """un aviso ya resuelto no debe hacerse pasar por el motivo del rechazo"""
+    import inspect
+    fuente = inspect.getsource(rpa_sipp.FlujoSolicitudPago.guardar)
+    pos_limpia = fuente.index("s.validaciones()")
+    pos_clic = fuente.index("clic_con_reintento")
+    assert pos_limpia < pos_clic, "se limpia ANTES de pulsar Guardar"
+
+
+# --------------------------------------------------------------------------- #
+#  El Vo.Bo. no está adjunto hasta que SIPP lo dice
+# --------------------------------------------------------------------------- #
+# Elegir el archivo y subirlo son dos cosas distintas: el selector se llena al
+# instante, en el navegador, y SIPP tarda en llevarlo a su almacenamiento. Solo
+# cuando termina le pone nombre al renglón, y ese nombre es lo que mira para
+# dejar enviar a autorizar. Dar el adjunto por bueno antes dejaba la solicitud
+# guardada y a SIPP contestando que faltaba el documento de respaldo.
+class _SesionRespaldo:
+    """Doble de sesión con una pestaña de documentos que tarda en registrar."""
+
+    def __init__(self, vueltas_hasta_subir=0, nunca=False):
+        self.vueltas = vueltas_hasta_subir
+        self.nunca = nunca
+        self.consultas = 0
+        self.subidos = []
+        self.avisos = []
+        self.capturas = []
+        self.page = self
+        self.renglones = 0
+
+    # --- pestaña y grid ---
+    def locator(self, _css):
+        ses = self
+
+        class _Grid:
+            def count(_s):
+                # Renglones del grid: uno más en cuanto se pulsa «agregar».
+                return ses.renglones
+
+            @property
+            def last(_s):
+                return _s
+
+            def input_value(_s):
+                return ""
+
+        return _Grid()
+
+    def abrir_pestana(self, _nombre):
+        pass
+
+    def loc(self, clave):
+        ses = self
+
+        class _Boton:
+            def click(_s, **_kw):
+                if clave == "doc.agregar":
+                    ses.renglones += 1
+
+        return type("W", (), {"first": _Boton()})()
+
+    def subir_archivo(self, _entrada, ruta, _desc):
+        self.subidos.append(ruta)
+
+    def esperar_a(self, condicion, tope_ms=0, intervalo_ms=0):
+        # Sondea de verdad: es justo lo que se le pide al motor aquí.
+        for _ in range(20):
+            if condicion():
+                return True
+            self.consultas += 1
+        return bool(condicion())
+
+    def cerrar_alertas(self, vueltas=6):
+        pass
+
+    def anotar(self, _paso, mensaje, _nivel=None):
+        self.avisos.append(mensaje)
+
+    def diagnostico(self, nombre):
+        self.capturas.append(nombre)
+
+
+def _sesion_respaldo(vueltas=0, nunca=False):
+    """Sesión cuyo grid solo muestra el nombre tras `vueltas` sondeos."""
+    ses = _SesionRespaldo(vueltas, nunca)
+    original = ses.locator
+
+    def _locator(css):
+        grid = original(css)
+        if "NB_DOCUMENTO" not in css:
+            return grid
+        ses_ref = ses
+
+        class _Nombres:
+            def count(_s):
+                return 1 if ses_ref.renglones else 0
+
+            def nth(_s, _i):
+                return _s
+
+            def input_value(_s):
+                if ses_ref.nunca:
+                    return ""
+                return ("VOBO.pdf" if ses_ref.consultas >= ses_ref.vueltas
+                        else "")
+
+        return _Nombres()
+
+    ses.locator = _locator
+    return ses
+
+
+def _archivo_temporal():
+    import tempfile
+    ruta = os.path.join(tempfile.gettempdir(), "vobo_prueba.pdf")
+    with open(ruta, "wb") as f:
+        f.write(b"%PDF-1.4\n")
+    return ruta
+
+
+def probar_no_se_da_por_adjunto_hasta_que_sipp_lo_registra():
+    """el selector se llena al instante; la subida tarda"""
+    ses = _sesion_respaldo(vueltas=3)
+    rpa_sipp.FlujoSolicitudPago(ses).adjuntar_respaldo(_archivo_temporal())
+    assert ses.consultas >= 3, "hay que esperar a que SIPP lo registre"
+    assert any("Vo.Bo. adjuntado" in a for a in ses.avisos)
+
+
+def probar_si_la_subida_no_termina_se_falla_antes_de_autorizar():
+    """mejor detenerse con el motivo que enviar sin el respaldo"""
+    ses = _sesion_respaldo(nunca=True)
+    try:
+        rpa_sipp.FlujoSolicitudPago(ses).adjuntar_respaldo(_archivo_temporal())
+        assert False, "debió fallar"
+    except rpa_sipp.ErrorRpa as exc:
+        assert "sin nombre" in str(exc) or "no terminó" in str(exc)
+
+
+# --------------------------------------------------------------------------- #
+#  El RFC manda sobre el nombre
+# --------------------------------------------------------------------------- #
+# El catálogo se busca por nombre, pero SIPP identifica al beneficiario por su
+# RFC. Cuando el nombre del Excel no coincide letra por letra con el registrado
+# el robot intentaba darlo de alta otra vez, y SIPP lo rechazaba al guardar, al
+# final del formulario y sin explicación.
+class _SesionRfc:
+    """Doble de sesión que responde si el RFC ya está registrado."""
+
+    def __init__(self, registrado):
+        self.registrado = registrado
+        self.avisos = []
+
+    def consultar(self, _nombre, defecto=None):
+        return self.registrado
+
+    def esperar_a(self, condicion, tope_ms=0, intervalo_ms=0):
+        return bool(condicion())
+
+    def anotar(self, _paso, mensaje, _nivel=None):
+        self.avisos.append(mensaje)
+
+
+def probar_un_rfc_ya_registrado_detiene_el_alta_al_momento():
+    """se avisa con el RFC en la mano, no al final y a ciegas"""
+    ses = _SesionRfc(registrado=True)
+    s = comun.solicitud(comun.lote().id, "ANA LOPEZ")
+    s.beneficiario_rfc = "PRU010101AB1"
+    try:
+        rpa_sipp.FlujoSolicitudPago(ses)._comprobar_rfc_libre(s)
+        assert False, "debió detenerse"
+    except rpa_sipp.RequiereRevision as exc:
+        assert "PRU010101AB1" in str(exc), "hay que decir cuál RFC"
+        assert "ANA LOPEZ" in str(exc), "y con qué solicitud pasa"
+
+
+def probar_un_rfc_libre_no_estorba_el_alta():
+    """el camino normal sigue igual"""
+    ses = _SesionRfc(registrado=False)
+    s = comun.solicitud(comun.lote().id, "ANA LOPEZ")
+    s.beneficiario_rfc = "PRU010101AB1"
+    rpa_sipp.FlujoSolicitudPago(ses)._comprobar_rfc_libre(s)

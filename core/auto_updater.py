@@ -3,8 +3,10 @@
 Pensado para una app empaquetada con PyInstaller (modo `sys.frozen`) e instalada
 con Inno Setup. Flujo:
 
-  1. Consulta la última release: GET /repos/{owner}/{repo}/releases/latest, con el
-     Token PAT en el header `Authorization: Bearer <TOKEN>`.
+  1. Lista las releases: GET /repos/{owner}/{repo}/releases, con el Token PAT
+     en el header `Authorization: Bearer <TOKEN>`, y se queda con la de mayor
+     versión. Se listan TODAS en vez de pedir `releases/latest` porque ese
+     endpoint esconde los pre-releases.
   2. Compara la versión local (core.version.__version__) contra el `tag_name`.
   3. Si hay una más nueva, ubica el asset del instalador, toma su id y lo descarga
      por la API de assets privados
@@ -127,11 +129,33 @@ class AutoUpdater:
             raise ErrorActualizacion(f"No se pudo conectar a GitHub: {exc.reason}") from exc
 
     # --------------------------------------------------- chequeo de versión
-    def obtener_release_latest(self) -> dict:
-        """Devuelve el JSON de la última release del repo."""
-        url = f"{API}/repos/{self.owner}/{self.repo}/releases/latest"
+    def obtener_release_mas_nueva(self) -> dict:
+        """Devuelve el JSON de la release más nueva publicada en el repo.
+
+        **No se usa `/releases/latest`**: ese endpoint esconde los pre-releases,
+        y con todas las releases marcadas como pre-release responde 404. El
+        updater se quedaba sin ver ninguna y, como cualquier fallo se traduce a
+        «no hay novedad», la app anunciaba que ya estaba al día mientras había
+        una versión nueva publicada (verificado contra el repo el 25/08/2026:
+        las dos releases existentes eran pre-release y `latest` daba 404).
+
+        Se listan todas y se elige la de MAYOR número de versión, no la primera:
+        la lista viene por fecha, así que publicar un parche de una versión
+        vieja después de una nueva haría retroceder a quien ya está adelante.
+        Los borradores se saltan porque sus assets no son descargables.
+        """
+        url = f"{API}/repos/{self.owner}/{self.repo}/releases?per_page=30"
         datos = self._pedir(url, "application/vnd.github+json")
-        return json.loads(datos.decode("utf-8"))
+        releases = json.loads(datos.decode("utf-8"))
+        if not isinstance(releases, list):
+            raise ErrorActualizacion(
+                "GitHub no devolvió la lista de releases del repositorio.")
+        publicadas = [r for r in releases if not r.get("draft")]
+        if not publicadas:
+            raise ErrorActualizacion(
+                "El repositorio no tiene ninguna release publicada.")
+        return max(publicadas,
+                   key=lambda r: self._normalizar(r.get("tag_name", "")))
 
     def _id_asset(self, release: dict) -> int | None:
         """Busca el id del asset por nombre dentro de la release."""
@@ -225,7 +249,7 @@ class AutoUpdater:
 
         `al_iniciar_descarga(tag)`: callback opcional justo antes de descargar.
         Lanza ErrorActualizacion ante cualquier problema (red, asset ausente…)."""
-        release = self.obtener_release_latest()
+        release = self.obtener_release_mas_nueva()
         tag = release.get("tag_name", "")
         if not self.hay_version_mas_nueva(tag):
             return None
@@ -265,7 +289,7 @@ class AutoUpdater:
         instalada (y no se marcó ya como aplicada, para no ofrecer una que
         entraría en bucle); si no, None. Solo CONSULTA, no descarga nada. Útil
         para avisar al usuario y que él decida cuándo aplicarla."""
-        release = self.obtener_release_latest()
+        release = self.obtener_release_mas_nueva()
         tag = release.get("tag_name", "")
         if not self.hay_version_mas_nueva(tag) or self._tag_ya_aplicado(tag):
             return None
