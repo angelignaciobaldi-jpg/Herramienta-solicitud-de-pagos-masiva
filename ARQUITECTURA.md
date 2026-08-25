@@ -185,8 +185,14 @@ Convenciones:
 
 - **Localizadores orientados al usuario** (`get_by_role`/`get_by_placeholder`/
   texto) con respaldos por CSS/`ng-model`.
-- **Chromium no se empaqueta**; se descarga la 1.ª vez a `DATOS\ms-playwright`
-  (`asegurar_navegador`). El driver (node) sí va empaquetado (`--collect-all`).
+- **Chromium no se empaqueta**; se reutiliza el del sistema si lo hay y, si no,
+  se descarga la 1.ª vez a `DATOS\ms-playwright` (`asegurar_navegador`). El
+  driver (node) sí va empaquetado (`--collect-all`).
+- `asegurar_navegador` **exporta siempre `PLAYWRIGHT_BROWSERS_PATH`**, aunque no
+  haya nada que descargar. Playwright, al verse empaquetado, se pone
+  `PLAYWRIGHT_BROWSERS_PATH=0`, y ese `0` no significa «lo de siempre» sino
+  «busca los navegadores DENTRO del paquete», donde nunca los hay. Lo hace con
+  `setdefault`, así que basta con llegar antes con una ruta real.
 - Cada módulo que opere el SIPP **reutiliza** `SesionSipp` y agrega ARRIBA sus
   flujos concretos, en vez de duplicar la automatización.
 - Las **páginas HTML de referencia** del portal (DOM real) se guardan localmente

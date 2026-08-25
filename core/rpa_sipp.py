@@ -179,29 +179,68 @@ def preparar_archivo(ruta: str) -> str:
 # --------------------------------------------------------------------------- #
 #  Navegador
 # --------------------------------------------------------------------------- #
-def asegurar_navegador(on_aviso=None) -> None:
-    """Descarga Chromium la primera vez, a `DATOS\\ms-playwright`.
+def _hay_navegadores(carpeta: str) -> bool:
+    """True si esa carpeta es un almacén de navegadores de Playwright."""
+    try:
+        return any(n.startswith("chromium") for n in os.listdir(carpeta))
+    except OSError:                 # no existe, o no se puede leer
+        return False
 
-    El navegador NO se empaqueta (son ~150 MB que harían enorme el instalador);
-    el driver de Playwright sí va incluido. Si ya hay navegadores instalados en
-    la máquina, se respetan y no se descarga nada.
+
+def _instalar_chromium() -> None:
+    """Ejecuta `playwright install chromium` de la forma que funcione aquí.
+
+    En la aplicación empaquetada `sys.executable` **es la propia herramienta**,
+    no un intérprete: llamarla con `-m playwright` abriría otra ventana de la
+    app en vez de instalar nada. Ahí hay que invocar directamente el driver
+    —node y su cli— que sí viaja dentro del paquete.
     """
-    if os.environ.get("PLAYWRIGHT_BROWSERS_PATH"):
+    flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+    entorno = None
+    if getattr(sys, "frozen", False):
+        from playwright._impl._driver import (compute_driver_executable,
+                                              get_driver_env)
+        node, cli = compute_driver_executable()
+        orden = [node, cli, "install", "chromium"]
+        entorno = get_driver_env()      # hereda PLAYWRIGHT_BROWSERS_PATH
+    else:
+        orden = [sys.executable, "-m", "playwright", "install", "chromium"]
+    subprocess.run(orden, check=False, creationflags=flags, env=entorno)
+
+
+def asegurar_navegador(on_aviso=None) -> None:
+    """Deja `PLAYWRIGHT_BROWSERS_PATH` apuntando a un Chromium utilizable.
+
+    El navegador NO se empaqueta —son ~150 MB que harían enorme el instalador—;
+    el driver de Playwright sí va incluido. Si ya hay navegadores en la máquina
+    se reutilizan y no se descarga nada.
+
+    **La variable se exporta SIEMPRE, incluso cuando no hay nada que
+    descargar.** No es un detalle: al detectar que la app está empaquetada,
+    Playwright se pone `PLAYWRIGHT_BROWSERS_PATH=0` a sí mismo, y ese `0` no
+    significa «el valor por defecto» sino «busca los navegadores DENTRO del
+    paquete», que es justo donde nunca los hay. Como lo hace con `setdefault`,
+    basta con que la variable traiga ya una ruta para que respete la nuestra.
+    Antes, encontrar los navegadores del sistema hacía volver de aquí sin
+    definirla, así que el camino bueno —no hay nada que descargar— era
+    precisamente el que dejaba la app sin navegador (visto en producción el
+    26/08/2026 al importar el catálogo de conceptos).
+    """
+    # Una ruta puesta a mano se respeta; el «0» de Playwright NO es una ruta.
+    elegida = os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "")
+    if elegida and elegida != "0":
         return
-    por_defecto = os.path.join(
+    del_sistema = os.path.join(
         os.environ.get("LOCALAPPDATA", ""), "ms-playwright")
-    if os.path.isdir(por_defecto) and os.listdir(por_defecto):
-        return                                  # ya instalado en el sistema
+    for carpeta in (del_sistema, CARPETA_NAVEGADOR):
+        if _hay_navegadores(carpeta):
+            os.environ["PLAYWRIGHT_BROWSERS_PATH"] = carpeta
+            return
     os.environ["PLAYWRIGHT_BROWSERS_PATH"] = CARPETA_NAVEGADOR
-    if os.path.isdir(CARPETA_NAVEGADOR) and os.listdir(CARPETA_NAVEGADOR):
-        return
     if callable(on_aviso):
         on_aviso("Descargando el navegador por única vez (~150 MB)…")
     os.makedirs(CARPETA_NAVEGADOR, exist_ok=True)
-    # Sin ventana de consola: la app es gráfica y una consola negra asusta.
-    flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
-    subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"],
-                   check=False, creationflags=flags)
+    _instalar_chromium()
 
 
 # --------------------------------------------------------------------------- #

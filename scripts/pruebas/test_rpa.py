@@ -888,3 +888,116 @@ def probar_un_rfc_libre_no_estorba_el_alta():
     s = comun.solicitud(comun.lote().id, "ANA LOPEZ")
     s.beneficiario_rfc = "PRU010101AB1"
     rpa_sipp.FlujoSolicitudPago(ses)._comprobar_rfc_libre(s)
+
+
+# --------------------------------------------------------------------------- #
+#  Dónde busca el navegador la aplicación instalada
+# --------------------------------------------------------------------------- #
+# Playwright, al detectar que la app está empaquetada, se pone
+# PLAYWRIGHT_BROWSERS_PATH=0 a sí mismo. Ese «0» no significa «lo de siempre»
+# sino «busca los navegadores DENTRO del paquete», y ahí no hay ninguno: pesan
+# ~150 MB y no se empaquetan a propósito. Como Playwright lo hace con
+# `setdefault`, la defensa es tener SIEMPRE la variable puesta a una ruta real.
+class _EntornoNavegador:
+    """Aísla las variables de entorno y las carpetas que mira el motor."""
+
+    def __init__(self, *, en_sistema=False, en_datos=False, valor_previo=None):
+        self.en_sistema = en_sistema
+        self.en_datos = en_datos
+        self.valor_previo = valor_previo
+        self.instalaciones = 0
+
+    def __enter__(self):
+        import tempfile
+        self._guardado = dict(os.environ)
+        self._instalar = rpa_sipp._instalar_chromium
+        self._carpeta = rpa_sipp.CARPETA_NAVEGADOR
+        rpa_sipp._instalar_chromium = self._contar
+
+        self.raiz = tempfile.mkdtemp()
+        self.sistema = os.path.join(self.raiz, "local", "ms-playwright")
+        self.datos = os.path.join(self.raiz, "datos", "ms-playwright")
+        if self.en_sistema:
+            os.makedirs(os.path.join(self.sistema, "chromium-1234"))
+        if self.en_datos:
+            os.makedirs(os.path.join(self.datos, "chromium-1234"))
+
+        os.environ["LOCALAPPDATA"] = os.path.join(self.raiz, "local")
+        os.environ.pop("PLAYWRIGHT_BROWSERS_PATH", None)
+        if self.valor_previo is not None:
+            os.environ["PLAYWRIGHT_BROWSERS_PATH"] = self.valor_previo
+        rpa_sipp.CARPETA_NAVEGADOR = self.datos
+        return self
+
+    def _contar(self):
+        self.instalaciones += 1
+
+    @property
+    def elegida(self):
+        return os.environ.get("PLAYWRIGHT_BROWSERS_PATH", "")
+
+    def __exit__(self, *_exc):
+        os.environ.clear()
+        os.environ.update(self._guardado)
+        rpa_sipp._instalar_chromium = self._instalar
+        rpa_sipp.CARPETA_NAVEGADOR = self._carpeta
+        return False
+
+
+def probar_los_navegadores_del_sistema_se_reutilizan():
+    """están ahí y pesan 150 MB: volver a bajarlos sería absurdo"""
+    with _EntornoNavegador(en_sistema=True) as ent:
+        rpa_sipp.asegurar_navegador()
+        assert ent.elegida == ent.sistema
+        assert ent.instalaciones == 0, "no había nada que descargar"
+
+
+def probar_el_cero_de_playwright_no_cuenta_como_ruta():
+    """es el fallo reportado: «0» manda a buscar dentro del paquete, y ahí no hay"""
+    # Con navegadores en el sistema y la variable en «0», la app se quedaba sin
+    # navegador: el camino bueno era justamente el que la rompía.
+    with _EntornoNavegador(en_sistema=True, valor_previo="0") as ent:
+        rpa_sipp.asegurar_navegador()
+        assert ent.elegida == ent.sistema, "hay que pisar el «0» con una ruta real"
+
+
+def probar_una_ruta_puesta_a_mano_se_respeta():
+    """quien la definió sabe lo que hace; no somos nadie para pisarla"""
+    with _EntornoNavegador(en_sistema=True, valor_previo="D:/navegadores") as ent:
+        rpa_sipp.asegurar_navegador()
+        assert ent.elegida == "D:/navegadores"
+
+
+def probar_sin_navegadores_se_descarga_a_la_carpeta_de_la_app():
+    """la primera vez en un equipo hay que bajarlo, y a un sitio nuestro"""
+    with _EntornoNavegador() as ent:
+        avisos = []
+        rpa_sipp.asegurar_navegador(avisos.append)
+        assert ent.elegida == ent.datos
+        assert ent.instalaciones == 1
+        assert avisos, "descargar 150 MB sin avisar parece que se colgó"
+
+
+def probar_lo_ya_descargado_por_la_app_no_se_vuelve_a_bajar():
+    """una actualización no puede costar otros 150 MB"""
+    with _EntornoNavegador(en_datos=True) as ent:
+        rpa_sipp.asegurar_navegador()
+        assert ent.elegida == ent.datos
+        assert ent.instalaciones == 0
+
+
+def probar_una_carpeta_vacia_no_pasa_por_instalada():
+    """existir no es tener: una carpeta a medias dejaba la app sin navegador"""
+    with _EntornoNavegador() as ent:
+        os.makedirs(ent.sistema)          # existe, pero sin ningún chromium
+        rpa_sipp.asegurar_navegador()
+        assert ent.elegida == ent.datos
+        assert ent.instalaciones == 1
+
+
+def probar_la_app_empaquetada_no_se_llama_a_si_misma_para_instalar():
+    """sys.executable es la herramienta: «-m playwright» abriría otra ventana"""
+    import inspect
+    fuente = inspect.getsource(rpa_sipp._instalar_chromium)
+    assert "frozen" in fuente, "hay que distinguir el ejecutable del intérprete"
+    assert "compute_driver_executable" in fuente, "en el paquete se usa el driver"
