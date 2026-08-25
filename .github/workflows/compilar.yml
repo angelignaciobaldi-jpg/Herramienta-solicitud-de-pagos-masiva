@@ -110,6 +110,15 @@ jobs:
         shell: pwsh
         run: python scripts/probar.py
 
+      # El mapa de selectores viaja por el secreto, no por el repositorio, así
+      # que puede quedarse atrás del código sin que nada se queje: el build
+      # pasaría y el instalador fallaría en el equipo del usuario, a media
+      # captura. Se comprueba que traiga TODO lo que el código le pide, leyendo
+      # las claves del propio código para que la lista no se desincronice.
+      - name: Comprobar que el mapa de SIPP no se quedó atrás
+        shell: pwsh
+        run: python scripts/verificar_sipp_json.py
+
       # 1. Compilar la app con flet pack (onedir). Incluye el driver de Playwright
       #    via --collect-all. NO empaqueta Chromium: se descarga en la 1ra
       #    ejecución del RPA en la PC del usuario. Imagenes sí va (versionada).
