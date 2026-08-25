@@ -767,6 +767,25 @@ class _SesionRespaldo:
         self.capturas.append(nombre)
 
 
+class _SinMapa:
+    """Resuelve las claves de selector a sí mismas, sin el mapa del portal.
+
+    El mapa no se versiona —el repositorio es público— y viaja al CI por un
+    secreto. Una prueba de LÓGICA que lo consulte deja de probar lo suyo y pasa
+    a depender de que ese secreto esté al día: al añadir un selector nuevo, el
+    CI se caía con un `KeyError` que no decía nada del comportamiento probado.
+    """
+
+    def __enter__(self):
+        self._css = rpa_sipp.selectores.css
+        rpa_sipp.selectores.css = lambda clave: clave
+        return self
+
+    def __exit__(self, *_exc):
+        rpa_sipp.selectores.css = self._css
+        return False
+
+
 def _sesion_respaldo(vueltas=0, nunca=False):
     """Sesión cuyo grid solo muestra el nombre tras `vueltas` sondeos."""
     ses = _SesionRespaldo(vueltas, nunca)
@@ -774,7 +793,7 @@ def _sesion_respaldo(vueltas=0, nunca=False):
 
     def _locator(css):
         grid = original(css)
-        if "NB_DOCUMENTO" not in css:
+        if css != "doc.nombre":
             return grid
         ses_ref = ses
 
@@ -808,7 +827,8 @@ def _archivo_temporal():
 def probar_no_se_da_por_adjunto_hasta_que_sipp_lo_registra():
     """el selector se llena al instante; la subida tarda"""
     ses = _sesion_respaldo(vueltas=3)
-    rpa_sipp.FlujoSolicitudPago(ses).adjuntar_respaldo(_archivo_temporal())
+    with _SinMapa():
+        rpa_sipp.FlujoSolicitudPago(ses).adjuntar_respaldo(_archivo_temporal())
     assert ses.consultas >= 3, "hay que esperar a que SIPP lo registre"
     assert any("Vo.Bo. adjuntado" in a for a in ses.avisos)
 
@@ -817,7 +837,9 @@ def probar_si_la_subida_no_termina_se_falla_antes_de_autorizar():
     """mejor detenerse con el motivo que enviar sin el respaldo"""
     ses = _sesion_respaldo(nunca=True)
     try:
-        rpa_sipp.FlujoSolicitudPago(ses).adjuntar_respaldo(_archivo_temporal())
+        with _SinMapa():
+            rpa_sipp.FlujoSolicitudPago(ses).adjuntar_respaldo(
+                _archivo_temporal())
         assert False, "debió fallar"
     except rpa_sipp.ErrorRpa as exc:
         assert "sin nombre" in str(exc) or "no terminó" in str(exc)
