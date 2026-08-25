@@ -144,7 +144,13 @@ ETIQUETA_ESTADO: dict[str, str] = {
 # el repositorio es público (ver core/sipp_datos.py). `AMBIENTES` se resuelve al
 # primer uso y no al importar, para que la falta del archivo se explique donde
 # se pueda hacer algo al respecto y no como un error de import.
-AMBIENTE_DEFECTO = "PRUEBAS"
+# La herramienta opera contra PRODUCCIÓN y no ofrece cambiarlo: es la
+# instalación con la que trabaja el área, y un selector de ambiente en la
+# pantalla es sobre todo una forma de equivocarse —capturar un lote entero
+# contra stage creyendo que quedó registrado, o al revés—. Los ensayos se hacen
+# desde los scripts de `scripts/`, que sí eligen ambiente, y no desde la app
+# instalada.
+AMBIENTE_DEFECTO = "PRODUCCION"
 
 
 def ambientes() -> dict[str, str]:

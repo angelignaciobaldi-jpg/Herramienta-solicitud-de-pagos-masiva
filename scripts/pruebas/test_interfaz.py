@@ -34,26 +34,34 @@ def probar_las_pantallas_se_construyen():
         assert pantalla.contenido is not None, clase.__name__
 
 
-def probar_configuracion_avisa_cuando_es_produccion():
-    """el modal enseña la URL del ambiente y advierte si es producción"""
-    # Es lo único que separa un ensayo de una captura real en el ERP de verdad,
-    # así que tiene que verse antes de aceptar, no después.
+def probar_configuracion_dice_contra_que_sipp_se_trabaja():
+    """el modal enseña la URL real y advierte que cada folio es de verdad"""
+    # Ya no se elige ambiente, pero SÍ hay que poder comprobar contra dónde se
+    # está trabajando: es lo que separa un ensayo de una captura en el ERP real.
     from core.catalogos import AMBIENTES
     from ui.configuracion import SeccionConfiguracion
 
     app = comun.AppFalsa()
     modal = SeccionConfiguracion(app)
     assert modal.dialogo is not None
-
-    modal.dd_ambiente.value = "PRUEBAS"
-    modal._refrescar_ambiente()
-    assert not modal.txt_aviso_prod.visible
-    assert modal.txt_url.value == AMBIENTES["PRUEBAS"]
-
-    modal.dd_ambiente.value = "PRODUCCION"
-    modal._refrescar_ambiente()
-    assert modal.txt_aviso_prod.visible
     assert modal.txt_url.value == AMBIENTES["PRODUCCION"]
+    assert modal.txt_aviso_prod.visible, "el aviso del folio real siempre a la vista"
+    assert not hasattr(modal, "dd_ambiente"), "no debe poder elegirse"
+
+
+def probar_el_ambiente_no_se_puede_dejar_apuntando_a_pruebas():
+    """una preferencia vieja no puede mandar el lote al SIPP equivocado"""
+    # Se podía elegir, y la elección quedaba guardada en el equipo: haberla
+    # dejado en pruebas una vez bastaba para capturar un lote entero contra
+    # stage sin que nada lo delatara.
+    from core import preferencias
+    from ui.configuracion import ambiente_actual
+
+    preferencias.guardar_valor("ambiente", "PRUEBAS")
+    try:
+        assert ambiente_actual() == "PRODUCCION"
+    finally:
+        preferencias.guardar_valor("ambiente", "PRODUCCION")
 
 
 def probar_solicitudes_crea_lote_y_da_de_alta():
