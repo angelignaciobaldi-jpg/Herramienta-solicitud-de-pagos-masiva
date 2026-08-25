@@ -339,9 +339,13 @@ class AppSolicitudesPago:
     async def _buscar_actualizacion_manual(self, _e=None) -> None:
         self.btn_actualizar.disabled = True
         self.page.update()
-        tag = await asyncio.to_thread(_comprobar_update_sync)
+        tag, problema = await asyncio.to_thread(_comprobar_update_sync)
         self.btn_actualizar.disabled = False
         self.page.update()
+        if problema:
+            self.avisar(f"No se pudo comprobar si hay una versión nueva: "
+                        f"{problema}", ft.Colors.AMBER_800, duracion=8000)
+            return
         if not tag:
             self.avisar("Ya tienes la última versión instalada.",
                         ft.Colors.GREEN_700)
@@ -434,27 +438,34 @@ def _pantalla_cargando(page: ft.Page, titulo: str, mensaje: str) -> None:
     page.update()
 
 
-def _comprobar_update_sync() -> str | None:
-    """Chequeo SÍNCRONO (para correr en un hilo): devuelve el tag disponible o
-    None. Solo en la app empaquetada con PAT; cualquier fallo -> None."""
+def _comprobar_update_sync() -> tuple[str | None, str]:
+    """Chequeo SÍNCRONO (para correr en un hilo): `(tag_disponible, problema)`.
+
+    Se devuelven por separado porque NO significan lo mismo y la app las decía
+    igual: si la consulta fallaba —sin red, sin token, GitHub caído— el chequeo
+    devolvía «no hay novedad» y la app respondía «Ya tienes la última versión
+    instalada», que es afirmar justo lo que no se pudo comprobar.
+    """
     if not getattr(sys, "frozen", False):
-        return None
+        return None, "Solo la aplicación instalada se actualiza sola."
     try:
         from core import entorno
         from core.auto_updater import AutoUpdater
 
         if not entorno.github_pat(requerido=False):
-            return None
-        return AutoUpdater().hay_actualizacion()
-    except Exception:  # noqa: BLE001 — el chequeo nunca debe estorbar
-        return None
+            return None, "Falta el token de acceso al repositorio."
+        return AutoUpdater().hay_actualizacion(), ""
+    except Exception as exc:  # noqa: BLE001 — el chequeo nunca debe estorbar
+        return None, str(exc)
 
 
 async def _revisar_actualizacion_2do_plano(page: ft.Page,
                                            app: "AppSolicitudesPago") -> None:
     """Tras cargar la app, revisa en segundo plano si hay una versión nueva; si
     la hay, prende el botón de actualización para que el usuario la aplique."""
-    tag = await asyncio.to_thread(_comprobar_update_sync)
+    # En segundo plano se calla: si no se pudo comprobar, no hay nada que el
+    # usuario tenga que hacer ahora mismo. El botón lo dirá si lo pulsa.
+    tag, _problema = await asyncio.to_thread(_comprobar_update_sync)
     if tag:
         app.marcar_actualizacion_disponible(tag)
 

@@ -644,6 +644,34 @@ Corrida del **01/08/2026** con `prueba_guardado_stage.py` y
 - ⚠️ `filtros.nb_Proveedor` es **readonly**: lo llena el buscador de proveedores
   y no se puede teclear. El listado se filtra por descripción.
 
+Corrida del **24/08/2026**, instrumentando el portal para ver por qué el
+guardado no avanzaba (folios 3808–3810):
+
+- ⚠️ **SIPP rechaza en silencio.** `generarSolicitud()` valida campo por campo y,
+  al fallar, llama a `inlineMsg(campo, mensaje)` y hace `return`: pinta un globo
+  pegado al campo y no muestra alerta, no abre diálogo y no llama a su servidor.
+  Desde fuera es indistinguible de «el botón no hizo nada». El motor ahora
+  observa esas funciones (`espiar_validaciones`) y **reporta el mensaje textual
+  del portal** en vez de esperar un folio que no va a llegar.
+- ⚠️ **La fecha de pago solo se registra al perder el foco.** El campo visible
+  lleva el texto con máscara; SIPP lo convierte a fecha y lo pasa al modelo en un
+  `blur` de jQuery (`directivas.js`). Escribir y disparar `input`/`change` dejaba
+  el recuadro con la fecha a la vista y el modelo vacío, y al guardar cortaba con
+  «La información de la Fecha Pago es requerida». `_poner_fecha` comprueba ahora
+  **el modelo**, no lo que se ve.
+- ⚠️ **Elegir el Vo.Bo. no es haberlo subido.** SIPP le pone nombre al renglón
+  (`NB_DOCUMENTO`) cuando termina de subirlo, y ese nombre es lo que mira para
+  dejar enviar a autorizar. Comprobar el selector de archivo —que se llena al
+  instante— daba el adjunto por bueno con la subida a medias, y el envío se
+  rechazaba sin relación aparente con el documento que sí se había elegido.
+- ⚠️ **El catálogo se busca por nombre y SIPP identifica por RFC.** Si el nombre
+  no coincide letra por letra con el registrado, el robot daba de alta un
+  duplicado y SIPP lo rechazaba al guardar. Ahora se consulta al escribir el RFC
+  y se detiene ahí, con el RFC y la solicitud en el mensaje.
+- ✅ Extremo a extremo tras los arreglos: **guardar → adjuntar Vo.Bo. → solicitar
+  autorización**, comprobado en el listado (3809 y 3810 en `PENDIENTE`; la 3808,
+  de antes del arreglo del adjunto, se quedó en `BORRADOR`).
+
 Ningún paso del motor queda sin validar contra el ambiente de pruebas. Lo que no
 se ha hecho nunca es una corrida contra **producción**.
 
@@ -687,6 +715,25 @@ navegación horizontal en el encabezado, fechas siempre por `comun.CampoFecha`.
 - Selección múltiple para acciones masivas: omitir, cambiar punto de parada,
   reintentar.
 - Marca visual en celdas provenientes de documento frente a celdas capturadas.
+
+### Reporte final del lote
+
+Al terminar la ejecución —haya acabado entera, se haya detenido o se haya
+interrumpido— se abre un modal con **todas** las solicitudes del lote:
+
+- Arriba, el **total** y el desglose por resultado.
+- Debajo, **una pestaña por resultado**: Registradas, Con errores, Para revisar
+  y —solo si tiene algo— Sin procesar. Cada fila lleva beneficiario, descripción,
+  importe, folio de SIPP y el motivo cuando lo hay.
+
+Sustituye al aviso que se desvanecía: con lotes de decenas de solicitudes, saber
+CUÁNTAS fallaron no sirve de nada sin saber cuáles. Se lee de la base y no del
+resumen del motor, para que sobreviva a que el lote se corte a media captura.
+
+Los estados se reparten así, y el reparto **suma siempre el total**: un estado
+que no encaje en ningún grupo cae en «sin procesar» en vez de desaparecer.
+`LLENADA` va con las de revisar —el formulario se llenó, pero espera a que
+alguien lo guarde— y no con las que no se intentaron.
 
 ### Catálogo de conceptos de pago
 
@@ -792,8 +839,13 @@ Un push a `main` no es un release. El flujo es el de la sección 10 de
 3. El CI sincroniza `version.py` y `AppVersion` con el tag, corre
    `scripts/smoke_import.py`, compila con `flet pack`, empaqueta Tesseract, arma
    el instalador con Inno Setup y sube `Instalador_SolicitudesPago.exe`.
-4. La app consulta `releases/latest` al arrancar, descarga el asset privado con
-   el PAT y lo aplica en silencio, reiniciándose sola.
+4. La app lista las releases al arrancar, toma la de mayor versión, descarga el
+   asset privado con el PAT y lo aplica en silencio, reiniciándose sola. **No
+   se usa `releases/latest`**: ese endpoint esconde los pre-releases, y con las
+   dos releases del repo marcadas así respondía 404 —la app anunciaba que
+   estaba al día mientras la versión nueva llevaba días publicada
+   (25/08/2026)—. Un fallo de consulta ya no se disfraza de «no hay novedad»:
+   se dice que no se pudo comprobar.
 
 Requisitos propios de esta herramienta:
 

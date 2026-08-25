@@ -32,6 +32,7 @@ from ui.componentes import (boton_herramienta, boton_primario, boton_secundario,
                             buscador, campo_opciones, fila_resultado,
                             icono_accion, tarjeta_seccion)
 from ui.configuracion import ambiente_actual, navegador_visible
+from ui.reporte_lote import ReporteLote
 from ui.tabla_responsiva import (DER, Cabecera, ColumnaTabla, FilaDatos,
                                  SegmentoCabecera, TablaResponsiva)
 
@@ -1224,9 +1225,16 @@ class SeccionSolicitudes:
             self._detener = True
             texto.value = "Deteniendo… la solicitud en curso no se capturará."
             self.fila_pausa.visible = False
-            # Si estaba esperando la revisión, se le despierta para que el
-            # motor lea la orden en vez de quedarse dormido.
+            self.btn_cerrar_navegador.visible = False
+            # Se despiertan LAS DOS esperas del motor. La de la revisión es la
+            # evidente; la otra es la del final, cuando el lote ya terminó y el
+            # motor duerme esperando a que se cierre el navegador. Detener ahí
+            # no lo despertaba, así que el hilo se quedaba dormido para siempre:
+            # el aviso se quedaba en pantalla sin avanzar y el reporte final no
+            # llegaba nunca. Detener significa «termina ya» en cualquier punto,
+            # y si lo que falta es cerrar el navegador, se cierra.
             pausa.set()
+            cierre.set()
             dialogo.update()
 
         # --- Sincronización con el hilo del motor.
@@ -1266,8 +1274,19 @@ class SeccionSolicitudes:
                                       "sin detenerse en cada formulario")],
             spacing=8, wrap=True, visible=False)
 
+        def cerrar_navegador(_e=None) -> None:
+            # Matar Chromium tarda unos segundos. Sin acuse de recibo, el aviso
+            # se queda igual que estaba y parece que el botón no hizo nada.
+            texto.value = "Cerrando el navegador…"
+            self.btn_cerrar_navegador.disabled = True
+            try:
+                dialogo.update()
+            except Exception:  # noqa: BLE001 — el diálogo ya se fue
+                pass
+            cierre.set()
+
         self.btn_cerrar_navegador = boton_primario(
-            "Cerrar el navegador", ft.Icons.CLOSE, lambda _e: cierre.set())
+            "Cerrar el navegador", ft.Icons.CLOSE, cerrar_navegador)
         self.btn_cerrar_navegador.visible = False
 
         dialogo = ft.AlertDialog(
@@ -1372,21 +1391,33 @@ class SeccionSolicitudes:
             self._recargar_solicitudes()
             self.app.avisar(f"El lote se interrumpió: {exc}", ROJO,
                             duracion=10000)
+            # Aunque se haya interrumpido, lo capturado antes del corte ya está
+            # en SIPP: el reporte es la única forma de ver qué alcanzó a entrar.
+            self._mostrar_reporte(cancelado=True)
             return
         self._liberar_rpa = None
 
         self.page.pop_dialog()
         self._recargar_solicitudes()
-        partes = [f"{resumen['ok']} capturada(s)"]
-        if resumen["revisar"]:
-            partes.append(f"{resumen['revisar']} para revisar")
-        if resumen["error"]:
-            partes.append(f"{resumen['error']} con error")
-        if resumen["cancelado"]:
-            partes.append("detenido por ti")
-        color = (ROJO if resumen["error"] else
-                 NARANJA if resumen["revisar"] or resumen["cancelado"] else VERDE)
-        self.app.avisar("Lote terminado: " + " · ".join(partes), color,
-                        accion="Ver bitácora",
-                        on_accion=lambda _e: self.app.ir_a_bitacora(),
-                        duracion=10000)
+        # El reporte sustituye al aviso que se desvanecía: con lotes de decenas
+        # de solicitudes, saber CUÁNTAS fallaron no sirve de nada sin saber
+        # cuáles.
+        self._mostrar_reporte(cancelado=bool(resumen["cancelado"]))
+
+    def _mostrar_reporte(self, *, cancelado: bool = False) -> None:
+        """Abre el reporte final con el estado de todas las del lote.
+
+        Se lee de la base y no del resumen del motor: es lo que quedó
+        persistido, incluye lo que ya estaba capturado de corridas anteriores y
+        sobrevive a que el lote se interrumpa a media captura.
+        """
+        if not self._lote:
+            return
+        solicitudes = db.listar_solicitudes(self._lote.id)
+        if not solicitudes:
+            return
+        ReporteLote(self.page, solicitudes,
+                    nombre_lote=self._lote.nombre or "",
+                    cancelado=cancelado,
+                    al_ver_bitacora=self.app.ir_a_bitacora).abrir()
+

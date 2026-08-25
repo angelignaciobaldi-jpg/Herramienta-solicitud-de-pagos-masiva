@@ -215,8 +215,11 @@ Flujo end-to-end:
 3. El **CI** (`compilar.yml`) sincroniza `version.py` y `AppVersion` con el tag,
    corre el **smoke test de imports**, compila (`flet pack`), empaqueta Tesseract,
    arma el instalador (Inno Setup) y sube `Instalador_<App>.exe` como asset.
-4. Cada app instalada consulta `releases/latest`, compara versión, descarga el
-   asset privado (con el PAT) y lo aplica **en silencio**, reiniciándose sola.
+4. Cada app instalada **lista las releases** y se queda con la de mayor versión,
+   compara contra la suya, descarga el asset privado (con el PAT) y lo aplica
+   **en silencio**, reiniciándose sola. Se listan todas en vez de pedir
+   `releases/latest` porque ese endpoint **esconde los pre-releases**: con todas
+   marcadas como tal responde 404 y ninguna app se entera de nada.
 
 Salvaguardas: **el tag ES la versión** (el CI la reescribe, evita bucles de
 actualización); guard anti-bucle por `ultimo_tag_aplicado`; instalación **por

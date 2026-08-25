@@ -98,3 +98,8 @@ $RECYCLE.BIN/
 !.env.example
 !Imagenes/
 !.github/
+
+# Copias de conflicto que crea OneDrive al sincronizar («archivo-EQUIPO-1234.py»).
+# Una se coló en el repositorio y era una versión VIEJA de core/validador.py, que
+# es justo el tipo de archivo que alguien acaba editando por error.
+*-ASKE-[0-9]*.*

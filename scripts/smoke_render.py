@@ -312,6 +312,47 @@ async def _principal(page: ft.Page) -> None:
         except Exception as exc:  # noqa: BLE001
             _falla("modal Asignación masiva", exc)
 
+        try:
+            from core.db import Solicitud
+            from ui.reporte_lote import ReporteLote
+
+            # Solicitudes de mentira, en memoria: el reporte solo lee, así que
+            # no hace falta ensuciar la base para comprobar que se pinta.
+            def _falsa(estado, nombre, **kw):
+                return Solicitud(lote_id=lote_id, estado=estado,
+                                 beneficiario_nombre=nombre,
+                                 descripcion="Prueba de render",
+                                 importe_total=1234.56, **kw)
+
+            muestras = [
+                _falsa("ENVIADA_AUTORIZAR", "UNO", folio_sipp="3810"),
+                _falsa("GUARDADA", "DOS", folio_sipp="3811"),
+                _falsa("ERROR", "TRES", error_msg="SIPP no aceptó la solicitud"),
+                _falsa("REVISAR", "CUATRO", error_msg="Datos incompletos"),
+                _falsa("PENDIENTE", "CINCO"),
+            ]
+            reporte = ReporteLote(page, muestras, nombre_lote="Lote de prueba",
+                                  cancelado=True, al_ver_bitacora=lambda: None)
+            _revisar_wrap_con_expand("Reporte del lote", reporte.modal.dialogo)
+            reporte.abrir()
+            page.update()
+            await asyncio.sleep(0.5)
+            # Las cuatro pestañas tienen que repartirse las cinco solicitudes:
+            # si una cae fuera de todos los grupos, el desglose deja de cuadrar
+            # con el total y el reporte miente.
+            repartidas = sum(len(v) for v in reporte._grupos.values())
+            if repartidas != len(muestras):
+                raise AssertionError(
+                    f"el desglose no cuadra: {repartidas} de {len(muestras)}")
+            # Y cambiar de pestaña debe repintar la tabla, no dejar la anterior.
+            reporte._cambiar_pestana("error")
+            page.update()
+            await asyncio.sleep(0.3)
+            reporte.modal.cerrar()
+            _ok("modal Reporte del lote")
+        except Exception as exc:  # noqa: BLE001
+            _falla("modal Reporte del lote", exc)
+
     except Exception as exc:  # noqa: BLE001 — cualquier fallo no previsto
         _falla("arranque", exc)
         traceback.print_exc()

@@ -607,6 +607,59 @@ class SesionSipp:
             pass
         return " ".join(partes)
 
+    def consultar(self, nombre: str, defecto=None):
+        """Lee del modelo del portal lo que la pantalla no pinta.
+
+        Devuelve `defecto` si la consulta no está en el mapa o si la página no
+        la puede resolver: son lecturas de apoyo, y ninguna vale una excepción
+        que tumbe la captura.
+        """
+        try:
+            return self.page.evaluate(sipp_datos.consulta(nombre))
+        except Exception:  # noqa: BLE001 — mapa desactualizado o página en vuelo
+            return defecto
+
+    def espiar_validaciones(self) -> None:
+        """Empieza a registrar los avisos de validación del portal.
+
+        SIPP rechaza un formulario de dos maneras y solo una se ve: además de
+        las alertas emergentes, valida campo por campo con un mensaje pegado al
+        campo y **corta ahí mismo**, sin alerta, sin diálogo y sin llamar al
+        servidor. Un rechazo así es indistinguible de «el botón no hizo nada»:
+        el robot se quedaba veinte segundos esperando un folio que ya nunca iba
+        a llegar y reportaba que SIPP no había confirmado, sin decir por qué.
+
+        Se envuelven las funciones que el portal usa para avisar, de modo que
+        cada mensaje quede anotado aunque nadie lo vea y aunque `cerrar_alertas`
+        lo tape un segundo después. Las originales se siguen llamando: esto
+        observa, no cambia el comportamiento del portal.
+        """
+        try:
+            self.page.evaluate(sipp_datos.consulta("espiar_validaciones"))
+        except Exception:  # noqa: BLE001 — sin espía se sigue como antes
+            self.anotar("rpa", "No se pudo observar las validaciones de SIPP; "
+                        "si algo falla, el motivo puede quedar sin detalle",
+                        "WARN")
+
+    def validaciones(self) -> list[str]:
+        """Avisos de validación registrados desde la última consulta.
+
+        Vacía la lista al leerla: así cada paso pregunta por lo que SIPP dijo
+        de ÉL y no arrastra el aviso de un paso anterior ya resuelto.
+        """
+        try:
+            crudas = self.page.evaluate(
+                sipp_datos.consulta("leer_validaciones")) or []
+        except Exception:  # noqa: BLE001 — no se instaló o la página cambió
+            return []
+        mensajes = []
+        for v in crudas:
+            texto = " ".join(re.sub(r"<[^>]+>", " ",
+                                    str(v.get("msg", ""))).split())
+            if texto and texto not in mensajes:
+                mensajes.append(texto)
+        return mensajes
+
     def hay_error_sistema(self) -> bool:
         """Error del sistema visible, incluido el fallo intermitente de subida a
         Google Cloud Storage que SIPP arrastra."""
@@ -978,6 +1031,9 @@ class FlujoSolicitudPago:
         archivos = archivos or {}
         s = self.s
         self.asegurar_modo_agregar()
+        # Desde aquí queda constancia de todo lo que SIPP objete, incluidos los
+        # avisos que el propio robot cierra al pasar al campo siguiente.
+        s.espiar_validaciones()
 
         self.abortar_si_cancelan()
         # 1) Encabezado.
@@ -1066,29 +1122,40 @@ class FlujoSolicitudPago:
         self._poner_fecha(solicitud)
 
     def _poner_fecha(self, solicitud: Solicitud) -> None:
-        """Escribe la fecha de pago y comprueba que se haya quedado.
+        """Escribe la fecha de pago y comprueba que SIPP la haya tomado.
 
-        Se relee y se reintenta una vez: el grid de conceptos vuelve a pintarse
-        de forma asíncrona y puede limpiarla justo después de escribirla. Sin
-        fecha, SIPP no guarda y el motivo no aparece por ninguna parte.
+        El campo de fecha no es un campo: es un texto con máscara que SIPP
+        convierte a fecha de verdad **al perder el foco**, y solo entonces la
+        pasa al modelo que se guarda. Escribir y disparar los eventos de siempre
+        deja el formulario con la fecha a la vista y el modelo vacío; el portal
+        acepta seguir, y al guardar corta con «La información de la Fecha Pago
+        es requerida» pegada al campo, sin alerta ni diálogo (verificado en
+        stage el 24/08/2026 leyendo `directivas.js`). Por eso aquí se comprueba
+        el MODELO y no lo que se ve en pantalla: mirar el recuadro es
+        exactamente lo que hacía que esto pasara inadvertido.
+
+        Se reintenta una vez porque el grid de conceptos se repinta de forma
+        asíncrona y puede limpiar la fecha justo después de escribirla.
         """
         if not solicitud.fecha_pago:
             return
         s = self.s
         for intento in (1, 2):
             s.llenar("sol.fecha_pago", solicitud.fecha_pago, "Fecha de pago")
-            try:
-                quedo = (s.loc("sol.fecha_pago").first.input_value() or "").strip()
-            except Exception:  # noqa: BLE001 — no se pudo releer; se da por buena
+            # El foco sale del campo por la vía normal —así es como el portal
+            # espera enterarse— y se comprueba qué quedó registrado.
+            if s.esperar_a(lambda: bool(s.consultar("asentar_fecha_pago", "")),
+                           tope_ms=4000, intervalo_ms=300):
                 return
-            if quedo:
-                return
-            s.anotar("fecha", f"La fecha de pago se borró tras escribirla "
-                              f"(intento {intento}/2); se reintenta", "WARN")
+            s.anotar("fecha", f"SIPP no registró la fecha de pago tras "
+                              f"escribirla (intento {intento}/2); se reintenta",
+                     "WARN")
             s.page.wait_for_timeout(400)
+        s.captura("fecha_no_registrada")
         raise ErrorRpa(
-            "La fecha de pago no se queda escrita en el formulario. SIPP la "
-            "borra al recargar el desglose y sin ella no guarda la solicitud.")
+            "La fecha de pago no llega al formulario de SIPP: se escribe, se "
+            "ve en pantalla y el portal la descarta. Sin ella rechaza el "
+            "guardado sin decir por qué.")
 
     def _resolver_beneficiario(self, solicitud: Solicitud, panel,
                                archivos: dict) -> None:
@@ -1187,6 +1254,7 @@ class FlujoSolicitudPago:
             # corta a 13 caracteres. Uno incompleto da de alta a otra persona.
             s.llenar("ben.rfc", solicitud.beneficiario_rfc, "RFC", dentro=panel,
                      estricto=True)
+            self._comprobar_rfc_libre(solicitud)
         # El correo NO existe en el panel de Proveedor (solo en Deudor y
         # Acreedor), así que se comprueba antes de escribir en vez de darlo por
         # hecho: sin esto, un alta de Proveedor moría aquí.
@@ -1201,6 +1269,33 @@ class FlujoSolicitudPago:
         self._forma_y_gasto(solicitud)
         if solicitud.forma_pago == catalogos.FORMA_PAGO_CON_CUENTA:
             self._alta_cuenta_bancaria(solicitud, panel, archivos)
+
+    def _comprobar_rfc_libre(self, solicitud: Solicitud) -> None:
+        """Aborta si el RFC que se va a dar de alta ya existe en SIPP.
+
+        El catálogo se busca por NOMBRE, pero SIPP identifica al beneficiario
+        por su RFC. Cuando el nombre del Excel no coincide letra por letra con
+        el registrado —«S.A. DE C.V.» contra «SA DE CV», un acento, una
+        abreviatura— la búsqueda no lo encuentra y el robot intenta darlo de
+        alta otra vez. SIPP no lo impide mientras se llena: deja terminar el
+        formulario entero y lo rechaza al guardar, con un mensaje pegado al
+        campo del RFC y sin más explicación.
+
+        Se pregunta aquí, en cuanto el RFC está escrito, para fallar con la
+        causa a la mano en vez de al final y a ciegas.
+        """
+        s = self.s
+        # El portal resuelve la comprobación contra su servidor: no está la
+        # respuesta en el instante en que se termina de escribir.
+        if not s.esperar_a(lambda: s.consultar("rfc_ya_registrado", False),
+                           tope_ms=6000, intervalo_ms=300):
+            return
+        raise RequiereRevision(
+            f"El RFC {solicitud.beneficiario_rfc} ya está registrado en SIPP, "
+            f"pero «{solicitud.beneficiario_nombre}» no aparece en el catálogo "
+            f"con ese nombre. Búscalo en SIPP para ver con qué nombre está dado "
+            f"de alta y corrígelo en la solicitud; si se da de alta otra vez, "
+            f"SIPP rechaza el guardado.")
 
     def _buscar_beneficiario(self, nombre: str) -> str:
         """'nuevo' | 'existente' (lo selecciona) | 'ambiguo'."""
@@ -1531,15 +1626,43 @@ class FlujoSolicitudPago:
         """
         s = self.s
         s.anotar("guardar", "Guardando la solicitud")
+        s.espiar_validaciones()
+        s.validaciones()        # lo que SIPP objetó al llenar ya está resuelto
         s.clic_con_reintento("acc.guardar", "Guardar")
+
+        # SIPP contesta de una de tres formas: pide confirmación, guarda de
+        # golpe, o RECHAZA el formulario con un mensaje pegado a un campo y se
+        # detiene ahí —sin alerta, sin diálogo y sin llamar a su servidor—. Las
+        # tres se esperan a la vez porque son excluyentes: quedarse esperando el
+        # diálogo cuando ya hubo rechazo era gastar quince segundos para acabar
+        # diciendo «no confirmó», que es justo lo que no explica nada.
+        objetadas: list[str] = []
+
+        def _contesto() -> bool:
+            for m in s.validaciones():
+                if m not in objetadas:
+                    objetadas.append(m)
+            return bool(objetadas or s.visible_("acc.confirmar")
+                        or self._leer_folio() or s.visible_("acc.autorizar"))
+
+        s.esperar_a(_contesto, tope_ms=15000, intervalo_ms=300)
+        if objetadas:
+            # Es un dato que no cuadra, no una falla del robot: reintentarlo
+            # daría exactamente el mismo rechazo.
+            s.captura("guardar_rechazado")
+            motivo = " ".join(objetadas)
+            s.anotar("guardar", f"SIPP rechazó el formulario: {motivo}", "WARN")
+            raise RequiereRevision(
+                f"SIPP no aceptó la solicitud: {motivo}")
 
         # El diálogo de confirmación: si aparece y NO se acepta, SIPP no guarda
         # nada y después no hay forma de saber por qué. Se deja constancia de
-        # cuál de los dos caminos se tomó.
+        # cuál de los dos caminos se tomó. La espera es corta porque la de
+        # arriba ya le dio a SIPP su tiempo de responder.
         confirmado = False
         try:
             aceptar = s.loc("acc.confirmar").first
-            aceptar.wait_for(state="visible", timeout=15000)
+            aceptar.wait_for(state="visible", timeout=3000)
             aceptar.click()
             confirmado = True
         except Cancelado:
@@ -1608,6 +1731,11 @@ class FlujoSolicitudPago:
             # procesar). Sin esto, el mensaje obligaba a abrir la captura para
             # empezar a averiguar algo.
             pistas = []
+            for m in s.validaciones():
+                if m not in objetadas:
+                    objetadas.append(m)
+            if objetadas:
+                pistas.append("SIPP objetó: «" + " ".join(objetadas)[:300] + "»")
             if aviso:
                 pistas.append(f"SIPP respondió: «{aviso[:300]}»")
             if not confirmado:
@@ -1681,21 +1809,43 @@ class FlujoSolicitudPago:
                 "No se pudo agregar el renglón de documento de respaldo: la "
                 "pestaña no respondió al botón de agregar.")
 
+        nombres = s.page.locator(selectores.css("doc.nombre"))
+
+        def _registrados() -> list[str]:
+            """Documentos que SIPP ya dio por subidos, por su nombre."""
+            puestos = []
+            try:
+                for i in range(nombres.count()):
+                    valor = (nombres.nth(i).input_value() or "").strip()
+                    if valor:
+                        puestos.append(valor)
+            except Exception:  # noqa: BLE001 — el grid se está repintando
+                pass
+            return puestos
+
+        ya_estaban = len(_registrados())
         entrada = s.page.locator(selectores.css("doc.archivo")).last
         s.subir_archivo(entrada, ruta, "Vo.Bo.")
         s.cerrar_alertas()
 
-        # Y se comprueba que el archivo quedó en el campo.
-        try:
-            puesto = os.path.basename((entrada.input_value() or "").strip())
-        except Exception:  # noqa: BLE001
-            puesto = ""
-        if not puesto:
+        # Elegir el archivo NO es haberlo subido. SIPP lo manda a su
+        # almacenamiento y solo al terminar le pone nombre al renglón; ese
+        # nombre es justo lo que mira para dejar enviar a autorizar. Antes se
+        # comprobaba el selector de archivo —que se llena al instante, en el
+        # navegador— y se seguía de largo con la subida a medias: la solicitud
+        # quedaba guardada y SIPP contestaba que faltaba el documento de
+        # respaldo, sin relación aparente con el adjunto que sí se había
+        # elegido (verificado en stage el 24/08/2026).
+        s.esperar_a(lambda: len(_registrados()) > ya_estaban,
+                    tope_ms=60000, intervalo_ms=500)
+        puestos = _registrados()
+        if len(puestos) <= ya_estaban:
             s.diagnostico("respaldo_sin_archivo")
             raise ErrorRpa(
-                "El renglón de documento de respaldo quedó vacío tras adjuntar "
-                "el Vo.Bo.")
-        s.anotar("respaldo", f"Vo.Bo. adjuntado: {puesto}")
+                "SIPP no terminó de registrar el Vo.Bo.: el renglón de "
+                "documento de respaldo sigue sin nombre. Sin él no deja enviar "
+                "la solicitud a autorizar.")
+        s.anotar("respaldo", f"Vo.Bo. adjuntado: {puestos[-1]}")
 
     def solicitar_autorizacion(self) -> None:
         """Envía la solicitud a autorización y COMPRUEBA que se haya enviado.
@@ -1711,6 +1861,8 @@ class FlujoSolicitudPago:
         """
         s = self.s
         s.cerrar_alertas()
+        s.espiar_validaciones()
+        s.validaciones()        # lo anterior ya se resolvió al guardar
         s.clic_con_reintento("acc.autorizar", "Solicitar autorización")
         s.page.wait_for_timeout(1500)
         try:
@@ -1729,6 +1881,11 @@ class FlujoSolicitudPago:
 
         if s.visible_("acc.autorizar"):
             ruta = s.captura("autorizar_sin_efecto")
+            # SIPP también rechaza aquí en silencio, con el aviso pegado al
+            # campo en vez de en una alerta.
+            objetadas = s.validaciones()
+            if objetadas and not aviso:
+                aviso = " ".join(objetadas)
             detalle = f" SIPP dijo: «{aviso[:200]}»." if aviso else ""
             raise ErrorRpa(
                 "Se pulsó «Solicitar Autorización» pero la solicitud sigue sin "
