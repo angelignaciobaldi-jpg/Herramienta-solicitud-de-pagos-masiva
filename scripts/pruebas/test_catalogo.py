@@ -282,3 +282,96 @@ def probar_el_grid_no_repite_conceptos_al_desplazarse():
                                              _SelectoresFalsos)
     assert len(leidos) == len(set(leidos)), "hay duplicados"
     assert len(leidos) == 20
+
+
+# --------------------------------------------------------------------------- #
+#  La carátula siempre acaba en PDF
+# --------------------------------------------------------------------------- #
+# Es lo que el área entrega al banco y lo que SIPP guarda como respaldo de la
+# cuenta, pero llega a menudo como foto o captura de pantalla.
+def _imagen(carpeta, nombre="caratula.jpg", color=(200, 30, 30)):
+    import pymupdf
+
+    ruta = os.path.join(carpeta, nombre)
+    pix = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 200, 120))
+    pix.set_rect(pix.irect, color)
+    pix.save(ruta)
+    return ruta
+
+
+def _es_pdf(ruta) -> bool:
+    with open(ruta, "rb") as fh:
+        return fh.read(5) == b"%PDF-"
+
+
+def probar_una_caratula_en_imagen_se_convierte_a_pdf():
+    """la carátula tiene que ser un PDF, llegue como llegue"""
+    import tempfile
+
+    carpeta = tempfile.mkdtemp()
+    salida = documentos.asegurar_pdf(_imagen(carpeta))
+    assert salida.lower().endswith(".pdf"), salida
+    assert _es_pdf(salida), "y ser un PDF de verdad, no solo llamarse así"
+
+
+def probar_un_pdf_no_se_toca():
+    """convertir lo que ya está bien solo puede estropearlo"""
+    import tempfile
+
+    ruta = os.path.join(tempfile.mkdtemp(), "caratula.pdf")
+    with open(ruta, "wb") as fh:
+        fh.write(b"%PDF-1.4\n")
+    assert documentos.asegurar_pdf(ruta) == ruta
+
+
+def probar_dos_imagenes_distintas_no_se_pisan():
+    """«caratula.jpg» se llaman todas: sin el hash, la segunda borra a la primera"""
+    import tempfile
+
+    uno = documentos.asegurar_pdf(
+        _imagen(tempfile.mkdtemp(), color=(10, 200, 10)))
+    dos = documentos.asegurar_pdf(
+        _imagen(tempfile.mkdtemp(), color=(10, 10, 200)))
+    assert uno != dos, "cada carátula es la de una persona distinta"
+
+
+def probar_la_misma_imagen_no_se_convierte_dos_veces():
+    """reabrir un lote no debe rehacer el trabajo"""
+    import tempfile
+
+    ruta = _imagen(tempfile.mkdtemp())
+    assert documentos.asegurar_pdf(ruta) == documentos.asegurar_pdf(ruta)
+
+
+def probar_si_la_conversion_falla_se_usa_el_original():
+    """quedarse sin carátula detiene la solicitud entera; un JPG no"""
+    import tempfile
+
+    roto = os.path.join(tempfile.mkdtemp(), "caratula.png")
+    with open(roto, "wb") as fh:
+        fh.write(b"esto no es una imagen")
+    assert documentos.asegurar_pdf(roto) == roto
+
+
+def probar_al_registrar_la_caratula_queda_en_pdf():
+    """es el único sitio por el que pasan todas las vías de alta"""
+    import tempfile
+
+    lote = comun.lote()
+    s = db.guardar_solicitud(comun.solicitud(lote.id, "ANA LOPEZ"))
+    doc = documentos.registrar(s.id, _imagen(tempfile.mkdtemp()),
+                               documentos.TIPO_CARATULA, lote.id)
+    assert doc is not None
+    assert doc.ruta.lower().endswith(".pdf")
+    assert _es_pdf(doc.ruta)
+
+
+def probar_el_vobo_se_registra_tal_cual():
+    """el Vo.Bo. suele ser la captura del correo de autorización; SIPP la acepta"""
+    import tempfile
+
+    lote = comun.lote()
+    s = db.guardar_solicitud(comun.solicitud(lote.id, "ANA LOPEZ"))
+    ruta = _imagen(tempfile.mkdtemp(), "vobo.png")
+    doc = documentos.registrar(s.id, ruta, documentos.TIPO_VOBO, lote.id)
+    assert doc is not None and doc.ruta == ruta
