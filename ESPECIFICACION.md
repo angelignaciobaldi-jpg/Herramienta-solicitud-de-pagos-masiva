@@ -374,6 +374,16 @@ Se asignan de dos maneras, y ambas terminan en la tabla `documento`:
    López*), pero exige que **todas** las palabras del nombre estén presentes: un
    apellido de menos ya no es la misma persona.
 
+**La carátula siempre acaba en PDF.** Es lo que el área entrega al banco y lo
+que SIPP guarda como respaldo de la cuenta, pero llega a menudo como foto o
+captura de pantalla. Al registrarla —el único punto por el que pasan las dos
+vías de alta— una imagen se convierte a PDF (`documentos.asegurar_pdf`) y se
+guarda en `DATOS\caratulas`, no junto al original: suele venir de una carpeta
+compartida o de Descargas, donde no se debe escribir. Si la conversión falla se
+usa el original, porque quedarse sin carátula detiene la solicitud entera y un
+JPG no. El Vo.Bo. se registra tal cual: suele ser la captura del correo de
+autorización y SIPP la acepta.
+
 La falta de carátula se avisa en tres momentos: al guardar la solicitud, en el
 detalle de su fila en la tabla, y en la confirmación previa a ejecutar el lote.
 
@@ -611,6 +621,11 @@ nada; solo navega y lee):
 - ✅ Los catálogos de la plantilla coinciden **exactamente** con los de SIPP:
   Forma de Pago y Tipo de Gasto, cuatro valores cada uno.
 - ⚠️ La etiqueta real de la pestaña es **«Insumos & Servicios»**, no «Insumos».
+- ⚠️ El grid de conceptos **virtualiza**: solo mantiene en el DOM las filas
+  visibles. Hay que recorrerlo con scroll tanto para importar el catálogo como
+  para **elegir el concepto al capturar**; mirar solo lo que está puesto daba
+  por inexistentes los conceptos de más abajo, que son los dados de alta
+  después (reportado en producción el 26/08/2026).
 - ⚠️ En stage, `Aske` no tiene conceptos de pago asignados para Acreedor ni para
   Deudor (el grid llega vacío). Para probar el llenado completo hace falta una
   empresa que sí los tenga.

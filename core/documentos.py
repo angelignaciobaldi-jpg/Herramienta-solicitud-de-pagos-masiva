@@ -24,7 +24,7 @@ import os
 import re
 import unicodedata
 
-from core import db
+from core import db, rutas
 
 TIPO_CARATULA = "CARATULA"
 TIPO_VOBO = "VOBO"
@@ -106,15 +106,66 @@ def buscar_en_carpeta(carpeta: str, nombre_persona: str,
     return min(candidatos, key=lambda r: len(os.path.basename(r)))
 
 
+# Carátulas convertidas desde una imagen. Van a la carpeta de datos y no junto
+# al original: el usuario suele adjuntarlas desde una carpeta compartida o desde
+# Descargas, donde no se debe escribir y de donde el archivo puede desaparecer.
+CARPETA_CONVERTIDAS = os.path.join(rutas.DATOS, "caratulas")
+
+_IMAGENES = (".jpg", ".jpeg", ".png")
+
+
+def asegurar_pdf(ruta: str) -> str:
+    """Devuelve la carátula en PDF, convirtiéndola si llegó como imagen.
+
+    La carátula tiene que ser un PDF: es lo que el área entrega al banco y lo
+    que SIPP guarda como respaldo de la cuenta. Pero llega a menudo como foto o
+    captura de pantalla, y hasta ahora se subía tal cual.
+
+    Si algo falla al convertir se devuelve el original: quedarse sin carátula
+    es peor que subir un JPG, porque sin ella SIPP no deja dar de alta la cuenta
+    y la solicitud entera se detiene.
+    """
+    if not ruta or not os.path.isfile(ruta):
+        return ruta
+    if not ruta.lower().endswith(_IMAGENES):
+        return ruta
+    try:
+        import pymupdf
+
+        os.makedirs(CARPETA_CONVERTIDAS, exist_ok=True)
+        base = os.path.splitext(os.path.basename(ruta))[0]
+        # El hash va en el nombre para que dos imágenes distintas con el mismo
+        # nombre —«caratula.jpg» de dos personas— no se pisen la una a la otra.
+        destino = os.path.join(
+            CARPETA_CONVERTIDAS, f"{base}_{db.hash_archivo(ruta)[:8]}.pdf")
+        if os.path.isfile(destino):
+            return destino
+        with pymupdf.open(ruta) as imagen:
+            pdf = pymupdf.open("pdf", imagen.convert_to_pdf())
+            try:
+                pdf.save(destino)
+            finally:
+                pdf.close()
+        return destino
+    except Exception:  # noqa: BLE001 — ver el docstring: mejor el original
+        return ruta
+
+
 def registrar(solicitud_id: str, ruta: str, tipo: str,
               lote_id: str = "") -> db.Documento | None:
     """Asocia un archivo a una solicitud, reemplazando el anterior de ese tipo.
 
     Se reemplaza en vez de acumular porque una solicitud tiene UNA carátula y UN
     Vo.Bo.; guardar los dos intentos dejaría al motor eligiendo a ciegas.
+
+    Una carátula que llegue como imagen se convierte a PDF aquí, que es el único
+    sitio por el que pasan todas: el formulario de captura, el alta desde
+    carátulas y el emparejamiento por carpeta.
     """
     if not ruta or not os.path.isfile(ruta):
         return None
+    if tipo == TIPO_CARATULA:
+        ruta = asegurar_pdf(ruta)
     for previo in db.listar_documentos(solicitud_id=solicitud_id):
         if previo.tipo == tipo:
             db.borrar_documento(previo.id)

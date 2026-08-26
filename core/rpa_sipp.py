@@ -1566,8 +1566,21 @@ class FlujoSolicitudPago:
             if fila is None:
                 raise RequiereRevision(
                     f"La empresa no tiene un concepto que coincida con "
-                    f"«{concepto.concepto_nombre}» ({grid.count()} disponibles).")
+                    f"«{concepto.concepto_nombre}». Se recorrió el grid "
+                    f"completo, no solo lo que se veía en pantalla.")
             fila.scroll_into_view_if_needed()
+            # El renglón se COMPRUEBA después de moverlo. ng-grid recicla los
+            # nodos al desplazarse, así que el que se encontró puede haber
+            # pasado a mostrar otro concepto, y aquí se teclea dinero: escribir
+            # el importe en el renglón equivocado no lo notaría nadie hasta que
+            # el pago estuviera hecho.
+            if not self._fila_cuadra(fila, self._palabras_de(
+                    concepto.concepto_nombre)):
+                s.diagnostico("concepto_cambio_de_renglon")
+                raise ErrorRpa(
+                    f"El renglón de «{concepto.concepto_nombre}» dejó de ser "
+                    f"ese al desplazar el grid. No se captura el importe para "
+                    f"no ponerlo en el concepto equivocado.")
             campo = fila.locator(selectores.css("con.importe")).first
             # Se TECLEA: la directiva de moneda de SIPP necesita pulsaciones
             # reales; con fill() el modelo no confirma el importe.
@@ -1595,27 +1608,85 @@ class FlujoSolicitudPago:
 
         self._blindar_total(conceptos)
 
-    def _fila_concepto(self, concepto: str):
-        """Renglón cuyo texto contiene TODAS las palabras del concepto, sin
-        distinguir acentos ni mayúsculas. Así «PAGO PTU» encuentra también
-        «PAGO DE PTU», que es como algunas empresas lo tienen dado de alta."""
-        def normalizar(t: str) -> str:
-            t = unicodedata.normalize("NFKD", (t or "").upper())
-            return "".join(c for c in t if not unicodedata.combining(c))
+    @staticmethod
+    def _palabras_de(texto: str) -> list[str]:
+        """Palabras del concepto en mayúsculas y sin acentos, para comparar."""
+        limpio = unicodedata.normalize("NFKD", (texto or "").upper())
+        limpio = "".join(c for c in limpio if not unicodedata.combining(c))
+        return [w for w in limpio.split() if w]
 
-        palabras = [normalizar(w) for w in concepto.split() if w.strip()]
+    def _fila_cuadra(self, fila, palabras: list[str]) -> bool:
+        """True si el renglón contiene TODAS las palabras del concepto.
+
+        Se compara sin acentos ni mayúsculas y por palabras sueltas, así «PAGO
+        PTU» encuentra también «PAGO DE PTU», que es como algunas empresas lo
+        tienen dado de alta.
+        """
+        try:
+            texto = fila.locator(
+                selectores.css("con.nombre")).first.inner_text()
+        except Exception:  # noqa: BLE001 — renglón reciclado a media lectura
+            return False
+        visto = self._palabras_de(texto)
+        return bool(visto) and all(w in visto for w in palabras)
+
+    def _fila_concepto(self, concepto: str):
+        """Renglón del concepto, BAJANDO por el grid hasta dar con él.
+
+        El grid del portal es un **ng-grid**, que virtualiza: solo mantiene en
+        el DOM las filas visibles y las recicla al desplazarse. Mirar únicamente
+        lo que hay puesto encontraba los primeros conceptos y daba por
+        inexistentes los de más abajo, que son justamente los dados de alta
+        después. La solicitud se rechazaba diciendo que la empresa no tenía ese
+        concepto —cuando sí lo tenía— y bastaba con desplazar la lista a mano
+        para que el robot lo viera (reportado en producción el 26/08/2026).
+
+        Se busca SIEMPRE desde arriba: al capturar varios conceptos, el grid
+        queda donde lo dejó el anterior, y uno que estuviera por encima no se
+        encontraría nunca.
+        """
+        palabras = self._palabras_de(concepto)
         if not palabras:
             return None
-        grid = self.s.loc("con.filas")
-        for i in range(grid.count()):
-            fila = grid.nth(i)
+        s = self.s
+        grid = s.loc("con.filas")
+
+        def en_pantalla():
+            for i in range(grid.count()):
+                fila = grid.nth(i)
+                if self._fila_cuadra(fila, palabras):
+                    return fila
+            return None
+
+        viewport = s.page.locator(
+            f"{selectores.css('con.grid')} .ngViewport").first
+        try:
+            if viewport.count():
+                viewport.evaluate("el => { el.scrollTop = 0; }")
+                s.page.wait_for_timeout(180)
+        except Exception:  # noqa: BLE001 — sin viewport se mira lo que haya
+            pass
+
+        fila = en_pantalla()
+        if fila is not None or viewport.count() == 0:
+            return fila
+
+        for _ in range(200):               # tope duro: nunca un bucle infinito
+            s.abortar_si_cancelan()
             try:
-                texto = normalizar(
-                    fila.locator(selectores.css("con.nombre")).first.inner_text())
-            except Exception:  # noqa: BLE001
-                continue
-            if all(w in texto for w in palabras):
+                al_fondo = viewport.evaluate(
+                    "el => { const y = el.scrollTop;"
+                    " el.scrollTop = y + Math.max(40, el.clientHeight * 0.8);"
+                    " return el.scrollTop <= y + 1"
+                    " || el.scrollTop >= el.scrollHeight - el.clientHeight - 2; }")
+            except Exception:  # noqa: BLE001 — el grid desapareció
+                break
+            s.page.wait_for_timeout(180)   # deja que ng-grid repinte las filas
+            fila = en_pantalla()
+            if fila is not None:
                 return fila
+            if al_fondo:
+                break
         return None
 
     def _blindar_total(self, conceptos: list[Partida]) -> None:

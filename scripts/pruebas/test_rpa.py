@@ -1001,3 +1001,183 @@ def probar_la_app_empaquetada_no_se_llama_a_si_misma_para_instalar():
     fuente = inspect.getsource(rpa_sipp._instalar_chromium)
     assert "frozen" in fuente, "hay que distinguir el ejecutable del intérprete"
     assert "compute_driver_executable" in fuente, "en el paquete se usa el driver"
+
+
+# --------------------------------------------------------------------------- #
+#  Encontrar un concepto que no cabe en pantalla
+# --------------------------------------------------------------------------- #
+# El grid de conceptos es un ng-grid: solo mantiene en el DOM las filas visibles
+# y las recicla al desplazarse. Buscar únicamente en lo que hay puesto encuentra
+# los primeros y da por inexistentes los de más abajo —los dados de alta
+# después—, y la solicitud se rechaza diciendo que la empresa no tiene ese
+# concepto cuando sí lo tiene.
+class _GridVirtual:
+    """Grid que solo expone la «ventana» de filas visible en cada momento."""
+
+    VISIBLES = 13
+
+    def __init__(self, conceptos, con_viewport=True):
+        self.conceptos = list(conceptos)
+        self.con_viewport = con_viewport
+        self.tope = 0                    # primera fila visible
+        self.scrolls = 0
+
+    # --- lo que ve el motor ---
+    def ventana(self):
+        return self.conceptos[self.tope:self.tope + self.VISIBLES]
+
+    def bajar(self) -> bool:
+        self.scrolls += 1
+        ultimo = max(0, len(self.conceptos) - self.VISIBLES)
+        self.tope = min(self.tope + self.VISIBLES, ultimo)
+        return self.tope >= ultimo
+
+    def al_inicio(self) -> None:
+        self.tope = 0
+
+
+class _SesionGrid:
+    """Doble de sesión con un ng-grid virtualizado detrás."""
+
+    def __init__(self, grid):
+        self.grid = grid
+        self.page = self
+        self.cancelado = None
+
+    def wait_for_timeout(self, _ms):
+        pass
+
+    def abortar_si_cancelan(self):
+        pass
+
+    def anotar(self, *_a, **_kw):
+        pass
+
+    # `s.loc("con.filas")` -> las filas de la ventana actual
+    def loc(self, _clave):
+        return _Filas(self.grid)
+
+    # `s.page.locator(... .ngViewport)` -> el contenedor con scroll
+    def locator(self, _css):
+        return _Viewport(self.grid)
+
+
+class _Celda:
+    def __init__(self, texto):
+        self.texto = texto
+
+    @property
+    def first(self):
+        return self
+
+    def inner_text(self):
+        return self.texto
+
+
+class _Fila:
+    def __init__(self, texto):
+        self.texto = texto
+
+    def locator(self, _css):
+        return _Celda(self.texto)
+
+
+class _Filas:
+    def __init__(self, grid):
+        self.grid = grid
+
+    def count(self):
+        return len(self.grid.ventana())
+
+    def nth(self, i):
+        return _Fila(self.grid.ventana()[i])
+
+
+class _Viewport:
+    def __init__(self, grid):
+        self.grid = grid
+
+    @property
+    def first(self):
+        return self
+
+    def count(self):
+        return 1 if self.grid.con_viewport else 0
+
+    def evaluate(self, js):
+        if "scrollTop = 0" in js:
+            self.grid.al_inicio()
+            return None
+        return self.grid.bajar()
+
+
+def _flujo_grid(conceptos, con_viewport=True):
+    grid = _GridVirtual(conceptos, con_viewport)
+    flujo = rpa_sipp.FlujoSolicitudPago(_SesionGrid(grid))
+    return flujo, grid
+
+
+# 40 conceptos: solo 13 caben en pantalla, así que el último exige bajar.
+_MUCHOS = [f"CONCEPTO {i:02d}" for i in range(40)]
+
+
+def probar_un_concepto_fuera_de_pantalla_se_encuentra_bajando():
+    """es el fallo reportado: estaba dado de alta y el robot decía que no"""
+    with _SinMapa():
+        flujo, grid = _flujo_grid(_MUCHOS)
+        fila = flujo._fila_concepto("CONCEPTO 39")
+        assert fila is not None, "hay que recorrer el grid, no solo mirarlo"
+        assert fila.texto == "CONCEPTO 39"
+        assert grid.scrolls > 0, "y para eso hay que desplazarlo"
+
+
+def probar_lo_que_ya_se_ve_no_obliga_a_desplazar():
+    """el caso normal no debe costar un recorrido entero"""
+    with _SinMapa():
+        flujo, grid = _flujo_grid(_MUCHOS)
+        assert flujo._fila_concepto("CONCEPTO 02") is not None
+        assert grid.scrolls == 0
+
+
+def probar_la_busqueda_empieza_siempre_desde_arriba():
+    """con varios conceptos, uno por encima del anterior no se encontraría"""
+    # Al capturar el segundo concepto el grid sigue donde lo dejó el primero.
+    with _SinMapa():
+        flujo, grid = _flujo_grid(_MUCHOS)
+        assert flujo._fila_concepto("CONCEPTO 39") is not None
+        assert grid.tope > 0, "el grid quedó abajo"
+        fila = flujo._fila_concepto("CONCEPTO 01")
+        assert fila is not None, "hay que volver al principio antes de buscar"
+        assert fila.texto == "CONCEPTO 01"
+
+
+def probar_un_concepto_que_no_existe_se_reporta_tras_recorrerlo_todo():
+    """decir que no está solo vale si de verdad se miró todo"""
+    with _SinMapa():
+        flujo, grid = _flujo_grid(_MUCHOS)
+        assert flujo._fila_concepto("CONCEPTO INVENTADO") is None
+        assert grid.tope >= len(_MUCHOS) - _GridVirtual.VISIBLES, "hasta el fondo"
+
+
+def probar_el_concepto_se_reconoce_aunque_sobren_palabras():
+    """«PAGO PTU» tiene que encontrar «PAGO DE PTU»"""
+    with _SinMapa():
+        flujo, _grid = _flujo_grid(["NOMINA", "PAGO DE PTU", "VIGILANCIA"])
+        fila = flujo._fila_concepto("PAGO PTU")
+        assert fila is not None and fila.texto == "PAGO DE PTU"
+
+
+def probar_los_acentos_y_las_mayusculas_no_estorban():
+    """el catálogo se escribe como cada quien lo capturó"""
+    with _SinMapa():
+        flujo, _grid = _flujo_grid(["NÓMINA", "VIGILANCIA"])
+        assert flujo._fila_concepto("nomina") is not None
+
+
+def probar_sin_viewport_se_mira_lo_que_haya_sin_reventar():
+    """si el portal cambia el grid, se degrada; no se cae"""
+    with _SinMapa():
+        flujo, grid = _flujo_grid(_MUCHOS, con_viewport=False)
+        assert flujo._fila_concepto("CONCEPTO 02") is not None
+        assert flujo._fila_concepto("CONCEPTO 39") is None
+        assert grid.scrolls == 0
