@@ -1568,12 +1568,11 @@ class FlujoSolicitudPago:
                     f"La empresa no tiene un concepto que coincida con "
                     f"«{concepto.concepto_nombre}». Se recorrió el grid "
                     f"completo, no solo lo que se veía en pantalla.")
-            fila.scroll_into_view_if_needed()
-            # El renglón se COMPRUEBA después de moverlo. ng-grid recicla los
-            # nodos al desplazarse, así que el que se encontró puede haber
-            # pasado a mostrar otro concepto, y aquí se teclea dinero: escribir
-            # el importe en el renglón equivocado no lo notaría nadie hasta que
-            # el pago estuviera hecho.
+            # NO se vuelve a desplazar: `_fila_concepto` ya dejó el renglón a
+            # la vista, y mover el grid otra vez lo recicla y descoloca.
+            # Se COMPRUEBA una última vez antes de teclear, porque aquí se
+            # escribe dinero: poner el importe en el concepto equivocado no lo
+            # notaría nadie hasta que el pago estuviera hecho.
             if not self._fila_cuadra(fila, self._palabras_de(
                     concepto.concepto_nombre)):
                 s.diagnostico("concepto_cambio_de_renglon")
@@ -1584,7 +1583,19 @@ class FlujoSolicitudPago:
             campo = fila.locator(selectores.css("con.importe")).first
             # Se TECLEA: la directiva de moneda de SIPP necesita pulsaciones
             # reales; con fill() el modelo no confirma el importe.
-            campo.click()
+            # El tope es corto a propósito: si el campo no admite el clic, es
+            # que el renglón no está donde creemos, y esperar el minuto entero
+            # solo retrasa el diagnóstico —así moría la solicitud antes—.
+            try:
+                campo.click(timeout=10000)
+            except Cancelado:
+                raise
+            except Exception as exc:  # noqa: BLE001 — se explica y se corta
+                s.diagnostico("concepto_no_editable")
+                raise ErrorRpa(
+                    f"Se encontró «{concepto.concepto_nombre}» en el grid pero "
+                    f"su campo de importe no admitió la captura: {exc}"
+                ) from exc
             try:
                 campo.press("Control+a")
             except Exception:  # noqa: BLE001
@@ -1631,18 +1642,32 @@ class FlujoSolicitudPago:
         return bool(visto) and all(w in visto for w in palabras)
 
     def _fila_concepto(self, concepto: str):
-        """Renglón del concepto, BAJANDO por el grid hasta dar con él.
+        """Renglón del concepto, ya DENTRO del área visible del grid.
 
-        El grid del portal es un **ng-grid**, que virtualiza: solo mantiene en
-        el DOM las filas visibles y las recicla al desplazarse. Mirar únicamente
-        lo que hay puesto encontraba los primeros conceptos y daba por
-        inexistentes los de más abajo, que son justamente los dados de alta
-        después. La solicitud se rechazaba diciendo que la empresa no tenía ese
-        concepto —cuando sí lo tenía— y bastaba con desplazar la lista a mano
-        para que el robot lo viera (reportado en producción el 26/08/2026).
+        El grid del portal es un **ng-grid**: mantiene en el DOM muchas más
+        filas de las que enseña —recortadas por un viewport de apenas unos
+        cientos de píxeles— y las recicla al desplazarse. Eso rompe el llenado
+        de dos maneras distintas:
 
-        Se busca SIEMPRE desde arriba: al capturar varios conceptos, el grid
-        queda donde lo dejó el anterior, y uno que estuviera por encima no se
+        1. Mirar solo lo que hay puesto encontraba los primeros conceptos y daba
+           por inexistentes los de más abajo, que son los dados de alta después.
+           La solicitud se rechazaba diciendo que la empresa no tenía ese
+           concepto, y bastaba con desplazar la lista a mano para que el robot
+           lo viera.
+        2. Encontrar el renglón no basta para poder escribir en él. Un renglón
+           fuera del recorte existe, se puede leer y hasta parece normal, pero su
+           campo de importe no admite un clic: el robot se quedaba esperando
+           sesenta segundos a que fuera accionable y la solicitud moría en
+           `Timeout` sin haber escrito nada (reportado en producción el
+           27/08/2026, `.nth(15)`).
+
+        Por eso aquí no se devuelve el primer renglón que coincida, sino uno que
+        además esté a la vista. El desplazamiento lo hacemos nosotros sobre el
+        contenedor, en vez de confiar en que el navegador acerque el elemento:
+        con el viewport recortado, eso es justamente lo que no ocurría.
+
+        Se busca SIEMPRE desde arriba: al capturar varios conceptos el grid queda
+        donde lo dejó el anterior, y uno que estuviera por encima no se
         encontraría nunca.
         """
         palabras = self._palabras_de(concepto)
@@ -1660,19 +1685,25 @@ class FlujoSolicitudPago:
 
         viewport = s.page.locator(
             f"{selectores.css('con.grid')} .ngViewport").first
-        try:
-            if viewport.count():
+        hay_viewport = viewport.count() > 0
+        if hay_viewport:
+            try:
                 viewport.evaluate("el => { el.scrollTop = 0; }")
                 s.page.wait_for_timeout(180)
-        except Exception:  # noqa: BLE001 — sin viewport se mira lo que haya
-            pass
-
-        fila = en_pantalla()
-        if fila is not None or viewport.count() == 0:
-            return fila
+            except Exception:  # noqa: BLE001 — sin scroll se mira lo que haya
+                hay_viewport = False
 
         for _ in range(200):               # tope duro: nunca un bucle infinito
             s.abortar_si_cancelan()
+            fila = en_pantalla()
+            if fila is not None:
+                if not hay_viewport:
+                    return fila
+                fila = self._traer_a_la_vista(fila, viewport, en_pantalla)
+                if fila is not None:
+                    return fila
+            if not hay_viewport:
+                return None
             try:
                 al_fondo = viewport.evaluate(
                     "el => { const y = el.scrollTop;"
@@ -1682,11 +1713,43 @@ class FlujoSolicitudPago:
             except Exception:  # noqa: BLE001 — el grid desapareció
                 break
             s.page.wait_for_timeout(180)   # deja que ng-grid repinte las filas
-            fila = en_pantalla()
-            if fila is not None:
-                return fila
             if al_fondo:
-                break
+                # Una última mirada al fondo, ya sin más sitio al que bajar.
+                fila = en_pantalla()
+                if fila is None:
+                    break
+                return self._traer_a_la_vista(fila, viewport, en_pantalla)
+        return None
+
+    def _traer_a_la_vista(self, fila, viewport, buscar):
+        """Deja el renglón dentro del recorte del grid y lo vuelve a localizar.
+
+        Se re-localiza después de mover porque ng-grid RECICLA los nodos: el
+        renglón que se tenía en la mano puede pasar a mostrar otro concepto, y
+        aquí se teclea dinero.
+        """
+        s = self.s
+        for _ in range(8):
+            caja = fila.bounding_box()
+            marco = viewport.bounding_box()
+            if not caja or not marco:
+                return None
+            arriba = caja["y"] - marco["y"]
+            abajo = (caja["y"] + caja["height"]) - (marco["y"] + marco["height"])
+            if arriba >= -1 and abajo <= 1:
+                return fila                # ya se ve entero
+            # Se centra: dejarlo pegado al borde lo deja medio tapado por el
+            # encabezado del grid o por su barra de desplazamiento.
+            desfase = (caja["y"] + caja["height"] / 2) - (
+                marco["y"] + marco["height"] / 2)
+            try:
+                viewport.evaluate("(el, d) => { el.scrollTop += d; }", desfase)
+            except Exception:  # noqa: BLE001 — el grid desapareció
+                return None
+            s.page.wait_for_timeout(200)
+            fila = buscar()
+            if fila is None:
+                return None
         return None
 
     def _blindar_total(self, conceptos: list[Partida]) -> None:

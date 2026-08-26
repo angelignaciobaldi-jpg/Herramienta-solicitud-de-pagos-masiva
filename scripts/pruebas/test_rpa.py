@@ -1012,32 +1012,65 @@ def probar_la_app_empaquetada_no_se_llama_a_si_misma_para_instalar():
 # después—, y la solicitud se rechaza diciendo que la empresa no tiene ese
 # concepto cuando sí lo tiene.
 class _GridVirtual:
-    """Grid que solo expone la «ventana» de filas visible en cada momento."""
+    """Un ng-grid: muchas filas y un recorte pequeño que enseña unas pocas.
 
-    VISIBLES = 13
+    Modela las dos formas en que el grid del portal esconde una fila, porque
+    cada una rompe el llenado de una manera distinta:
 
-    def __init__(self, conceptos, con_viewport=True):
+    - `virtualiza=True`: solo las filas del recorte están en el DOM. La de más
+      abajo no existe hasta que se baja, y el robot decía que el concepto no
+      estaba dado de alta.
+    - `virtualiza=False`: todas están en el DOM, pero el recorte las tapa. La
+      fila se encuentra y se lee sin problema, y aun así su campo de importe no
+      admite un clic: ahí se quedaba el robot, esperando un minuto entero.
+    """
+
+    ALTO = 30          # alto de una fila, en píxeles
+    RECORTE = 210      # alto del área visible: siete filas
+
+    def __init__(self, conceptos, con_viewport=True, virtualiza=True):
         self.conceptos = list(conceptos)
         self.con_viewport = con_viewport
-        self.tope = 0                    # primera fila visible
+        self.virtualiza = virtualiza
+        self.scroll = 0
         self.scrolls = 0
 
-    # --- lo que ve el motor ---
-    def ventana(self):
-        return self.conceptos[self.tope:self.tope + self.VISIBLES]
+    @property
+    def total_px(self):
+        return len(self.conceptos) * self.ALTO
+
+    def indices_en_dom(self):
+        if not self.virtualiza:
+            return list(range(len(self.conceptos)))
+        primera = int(self.scroll // self.ALTO)
+        return list(range(primera,
+                          min(primera + self.RECORTE // self.ALTO,
+                              len(self.conceptos))))
+
+    def caja_de(self, indice):
+        """Dónde queda esa fila en la pantalla. El recorte empieza en y=0."""
+        return {"x": 0, "width": 800, "height": self.ALTO,
+                "y": indice * self.ALTO - self.scroll}
+
+    def a_la_vista(self, indice):
+        caja = self.caja_de(indice)
+        return caja["y"] >= 0 and caja["y"] + caja["height"] <= self.RECORTE
+
+    def desplazar(self, delta):
+        self.scrolls += 1
+        tope = max(0, self.total_px - self.RECORTE)
+        self.scroll = max(0, min(self.scroll + delta, tope))
 
     def bajar(self) -> bool:
-        self.scrolls += 1
-        ultimo = max(0, len(self.conceptos) - self.VISIBLES)
-        self.tope = min(self.tope + self.VISIBLES, ultimo)
-        return self.tope >= ultimo
+        self.desplazar(max(40, self.RECORTE * 0.8))
+        return self.scroll >= max(0, self.total_px - self.RECORTE)
 
-    def al_inicio(self) -> None:
-        self.tope = 0
+    def al_inicio(self):
+        self.scroll = 0
 
 
 class _SesionGrid:
-    """Doble de sesión con un ng-grid virtualizado detrás."""
+    """Doble de sesión con un ng-grid detrás."""
 
     def __init__(self, grid):
         self.grid = grid
@@ -1053,11 +1086,9 @@ class _SesionGrid:
     def anotar(self, *_a, **_kw):
         pass
 
-    # `s.loc("con.filas")` -> las filas de la ventana actual
     def loc(self, _clave):
         return _Filas(self.grid)
 
-    # `s.page.locator(... .ngViewport)` -> el contenedor con scroll
     def locator(self, _css):
         return _Viewport(self.grid)
 
@@ -1075,11 +1106,16 @@ class _Celda:
 
 
 class _Fila:
-    def __init__(self, texto):
-        self.texto = texto
+    def __init__(self, grid, indice):
+        self.grid = grid
+        self.indice = indice
+        self.texto = grid.conceptos[indice]
 
     def locator(self, _css):
         return _Celda(self.texto)
+
+    def bounding_box(self):
+        return self.grid.caja_de(self.indice)
 
 
 class _Filas:
@@ -1087,10 +1123,10 @@ class _Filas:
         self.grid = grid
 
     def count(self):
-        return len(self.grid.ventana())
+        return len(self.grid.indices_en_dom())
 
     def nth(self, i):
-        return _Fila(self.grid.ventana()[i])
+        return _Fila(self.grid, self.grid.indices_en_dom()[i])
 
 
 class _Viewport:
@@ -1104,17 +1140,22 @@ class _Viewport:
     def count(self):
         return 1 if self.grid.con_viewport else 0
 
-    def evaluate(self, js):
+    def bounding_box(self):
+        return {"x": 0, "y": 0, "width": 800, "height": self.grid.RECORTE}
+
+    def evaluate(self, js, arg=None):
         if "scrollTop = 0" in js:
             self.grid.al_inicio()
+            return None
+        if "scrollTop += d" in js:
+            self.grid.desplazar(arg)
             return None
         return self.grid.bajar()
 
 
-def _flujo_grid(conceptos, con_viewport=True):
-    grid = _GridVirtual(conceptos, con_viewport)
-    flujo = rpa_sipp.FlujoSolicitudPago(_SesionGrid(grid))
-    return flujo, grid
+def _flujo_grid(conceptos, con_viewport=True, virtualiza=True):
+    grid = _GridVirtual(conceptos, con_viewport, virtualiza)
+    return rpa_sipp.FlujoSolicitudPago(_SesionGrid(grid)), grid
 
 
 # 40 conceptos: solo 13 caben en pantalla, así que el último exige bajar.
@@ -1145,7 +1186,7 @@ def probar_la_busqueda_empieza_siempre_desde_arriba():
     with _SinMapa():
         flujo, grid = _flujo_grid(_MUCHOS)
         assert flujo._fila_concepto("CONCEPTO 39") is not None
-        assert grid.tope > 0, "el grid quedó abajo"
+        assert grid.scroll > 0, "el grid quedó abajo"
         fila = flujo._fila_concepto("CONCEPTO 01")
         assert fila is not None, "hay que volver al principio antes de buscar"
         assert fila.texto == "CONCEPTO 01"
@@ -1156,7 +1197,7 @@ def probar_un_concepto_que_no_existe_se_reporta_tras_recorrerlo_todo():
     with _SinMapa():
         flujo, grid = _flujo_grid(_MUCHOS)
         assert flujo._fila_concepto("CONCEPTO INVENTADO") is None
-        assert grid.tope >= len(_MUCHOS) - _GridVirtual.VISIBLES, "hasta el fondo"
+        assert grid.scroll >= grid.total_px - grid.RECORTE, "hasta el fondo"
 
 
 def probar_el_concepto_se_reconoce_aunque_sobren_palabras():
@@ -1181,3 +1222,32 @@ def probar_sin_viewport_se_mira_lo_que_haya_sin_reventar():
         assert flujo._fila_concepto("CONCEPTO 02") is not None
         assert flujo._fila_concepto("CONCEPTO 39") is None
         assert grid.scrolls == 0
+
+
+def probar_la_fila_se_entrega_dentro_del_area_visible():
+    """encontrarla no basta: fuera del recorte no se puede escribir en ella"""
+    # Es el segundo fallo reportado: el robot bajó, dio con el concepto y aun
+    # así se quedó un minuto esperando a que su campo de importe admitiera el
+    # clic, sin escribir nada y sin seleccionar el renglón.
+    with _SinMapa():
+        flujo, grid = _flujo_grid(_MUCHOS, virtualiza=False)
+        fila = flujo._fila_concepto("CONCEPTO 30")
+        assert fila is not None
+        assert grid.a_la_vista(fila.indice), (
+            "el renglón tiene que quedar dentro del recorte del grid")
+
+
+def probar_el_grid_se_mueve_para_dejarla_a_la_vista():
+    """si nadie desplaza el contenedor, la fila se queda tapada"""
+    with _SinMapa():
+        flujo, grid = _flujo_grid(_MUCHOS, virtualiza=False)
+        flujo._fila_concepto("CONCEPTO 30")
+        assert grid.scroll > 0, "hubo que bajar el grid"
+
+
+def probar_lo_que_ya_esta_a_la_vista_no_se_mueve():
+    """mover el grid recicla los renglones: no se toca si no hace falta"""
+    with _SinMapa():
+        flujo, grid = _flujo_grid(_MUCHOS, virtualiza=False)
+        fila = flujo._fila_concepto("CONCEPTO 01")
+        assert fila is not None and grid.scroll == 0
