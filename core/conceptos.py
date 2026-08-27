@@ -93,9 +93,61 @@ def nombres() -> list[str]:
     return [c.nombre for c in listar() if c.nombre]
 
 
+def comparable(nombre: str) -> str:
+    """Clave para decidir si dos conceptos son EL MISMO, escrito distinto.
+
+    Además de acentos y capitalización —que ya quita `normalizar`— se descarta
+    la puntuación: el mismo concepto viaja en el Excel del área con acentos y
+    en el catálogo de SIPP sin ellos, y con un punto o un guion de más o de
+    menos. «APOYO DE ÚTILES POR EXCELENCIA ACADÉMICA» y «APOYO DE UTILES POR
+    EXCELENCIA ACADEMICA» son el mismo concepto y tienen que emparejarse solos.
+
+    Lo que NO se hace es adivinar: se ignora cómo está escrito, no lo que dice.
+    Dos conceptos con palabras distintas siguen siendo distintos.
+    """
+    # Se QUITA la puntuación en vez de convertirla en espacio: «I.M.S.S.» tiene
+    # que acabar siendo «IMSS» y no «I M S S». Los espacios se van con ella, así
+    # que «PAGO-IMSS» y «PAGO IMSS» también acaban siendo el mismo.
+    return re.sub(r"[^A-Z0-9Ñ]+", "", normalizar(nombre))
+
+
+def canonico(nombre: str) -> str:
+    """El concepto tal y como está escrito en el catálogo de SIPP.
+
+    Devuelve el original si no hay ninguno equivalente: puede ser un concepto
+    que aún no se ha importado, y no es este el sitio donde se decide eso.
+
+    Se usa al INGERIR. Guardar el texto del Excel tal cual dejaba la partida con
+    un nombre que no era ninguna de las opciones del catálogo: el desplegable
+    aparecía vacío —aunque el importe sí estuviera— y abrirlo y guardar borraba
+    el concepto (reportado el 27/08/2026).
+    """
+    objetivo = comparable(nombre)
+    if not objetivo:
+        return (nombre or "").strip()
+    catalogo = listar()
+    for c in catalogo:
+        if comparable(c.nombre) == objetivo:
+            return c.nombre
+
+    # Segundo intento, para cuando en el Excel se escribe el concepto acortado:
+    # «PAGO PTU» contra «PAGO DE PTU». Se exige que la coincidencia sea ÚNICA;
+    # con dos candidatos no se adivina, porque elegir mal aquí manda el dinero
+    # a otro concepto y no lo notaría nadie.
+    palabras = set(normalizar(nombre).split())
+    if not palabras:
+        return (nombre or "").strip()
+    parecidos = [c.nombre for c in catalogo
+                 if palabras.issubset(set(normalizar(c.nombre).split()))]
+    if len(parecidos) == 1:
+        return parecidos[0]
+    return (nombre or "").strip()
+
+
 def existe(nombre: str) -> bool:
-    objetivo = normalizar(nombre)
-    return any(normalizar(c.nombre) == objetivo for c in listar())
+    objetivo = comparable(nombre)
+    return bool(objetivo) and any(
+        comparable(c.nombre) == objetivo for c in listar())
 
 
 def hay_catalogo() -> bool:

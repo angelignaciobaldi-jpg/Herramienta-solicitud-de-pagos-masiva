@@ -24,7 +24,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import date, datetime
 
-from core import catalogos, validador
+from core import catalogos, conceptos as cat_conceptos, validador
 from core.db import CONCEPTO, INSUMO, Partida, Solicitud, total_desglose
 from core.plantilla_excel import (CAMPOS, CAMPOS_PARTIDA, HOJA_PARTIDAS,
                                   HOJA_SOLICITUDES, _normalizar,
@@ -317,7 +317,7 @@ def _partidas_por_referencia(ruta: str) -> dict[str, list[Partida]]:
                 precio_unitario=_numero(dato(valores, "precio_unitario")),
                 origen="EXCEL")
             if clase == CONCEPTO:
-                partida.concepto_nombre = nombre
+                partida.concepto_nombre = cat_conceptos.canonico(nombre)
             else:
                 partida.insumo_nombre = nombre
             agrupadas.setdefault(referencia, []).append(partida)
@@ -413,7 +413,11 @@ def leer(ruta: str, lote_id: str = "", *,
                                   importe=_numero(dato(valores, "importe")),
                                   origen="EXCEL")
                 if clase == CONCEPTO:
-                    partida.concepto_nombre = nombre
+                    # Se guarda como lo tiene SIPP, no como venía escrito: el
+                    # Excel del área trae acentos que el catálogo no tiene, y
+                    # con el texto crudo el concepto no casaba con ninguna
+                    # opción del desplegable.
+                    partida.concepto_nombre = cat_conceptos.canonico(nombre)
                 else:
                     partida.insumo_nombre = nombre
                 partidas = [partida]

@@ -1155,3 +1155,46 @@ def probar_cerrar_el_navegador_acusa_recibo():
     cuerpo = _cuerpo_de("cerrar_navegador")
     assert "Cerrando" in cuerpo
     assert "disabled = True" in cuerpo, "y no se puede pulsar dos veces"
+
+
+def probar_el_concepto_importado_no_se_borra_al_abrir_y_guardar():
+    """un desplegable sin esa opción se pinta vacío, y guardar vacía el dato"""
+    # Reportado: el Excel traía el concepto con acentos, el catálogo lo tiene
+    # sin ellos, y en el modal el campo aparecía en blanco aunque el importe sí
+    # estuviera. Guardar así habría borrado el concepto sin avisar.
+    from core import conceptos
+    from core.db import CONCEPTO, Partida
+    from ui.captura_solicitud import CapturaSolicitud
+
+    conceptos.guardar("APOYO DE UTILES POR EXCELENCIA ACADEMICA")
+    lote = comun.lote()
+    s = db.guardar_solicitud(
+        comun.solicitud(lote.id, "ANA LOPEZ"),
+        [Partida(clase=CONCEPTO, importe=1000.0, origen="EXCEL",
+                 concepto_nombre="APOYO DE ÚTILES POR EXCELENCIA ACADÉMICA")])
+
+    modal = CapturaSolicitud(comun.AppFalsa(), lambda *_a: None)
+    modal.abrir(lote.id, s, db.listar_partidas(s.id))
+    renglon = modal.ed_conceptos.renglones[0]
+    assert renglon.tf_nombre.value, "el campo no puede quedar vacío"
+    assert "APOYO DE UTILES" in renglon.tf_nombre.value.upper()
+    # Y la opción tiene que existir, o el desplegable no la puede mostrar.
+    assert any(o.key == renglon.tf_nombre.value
+               for o in renglon.tf_nombre.options)
+
+
+def probar_un_concepto_fuera_del_catalogo_tampoco_se_pierde():
+    """puede ser uno recién dado de alta en SIPP y aún sin importar"""
+    from core.db import CONCEPTO, Partida
+    from ui.captura_solicitud import CapturaSolicitud
+
+    lote = comun.lote()
+    s = db.guardar_solicitud(
+        comun.solicitud(lote.id, "ANA LOPEZ"),
+        [Partida(clase=CONCEPTO, importe=500.0, origen="EXCEL",
+                 concepto_nombre="CONCEPTO QUE NADIE IMPORTO")])
+
+    modal = CapturaSolicitud(comun.AppFalsa(), lambda *_a: None)
+    modal.abrir(lote.id, s, db.listar_partidas(s.id))
+    renglon = modal.ed_conceptos.renglones[0]
+    assert renglon.tf_nombre.value == "CONCEPTO QUE NADIE IMPORTO"

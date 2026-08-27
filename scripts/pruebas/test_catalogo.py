@@ -375,3 +375,58 @@ def probar_el_vobo_se_registra_tal_cual():
     ruta = _imagen(tempfile.mkdtemp(), "vobo.png")
     doc = documentos.registrar(s.id, ruta, documentos.TIPO_VOBO, lote.id)
     assert doc is not None and doc.ruta == ruta
+
+
+# --------------------------------------------------------------------------- #
+#  El mismo concepto, escrito de otra forma
+# --------------------------------------------------------------------------- #
+# El Excel del área trae los conceptos con acentos y el catálogo de SIPP no los
+# tiene. Guardar el texto crudo dejaba la partida con un nombre que no era
+# ninguna de las opciones del desplegable: aparecía vacío aunque el importe sí
+# estuviera, y abrirlo y guardar borraba el concepto.
+def _con_catalogo(*nombres):
+    for n in nombres:
+        conceptos.guardar(n)
+
+
+def probar_los_acentos_no_hacen_de_un_concepto_otro():
+    """«ÚTILES … ACADÉMICA» es el mismo que «UTILES … ACADEMICA»"""
+    _con_catalogo("APOYO DE UTILES POR EXCELENCIA ACADEMICA")
+    assert conceptos.canonico("APOYO DE ÚTILES POR EXCELENCIA ACADÉMICA") == \
+        "APOYO DE UTILES POR EXCELENCIA ACADEMICA"
+
+
+def probar_la_puntuacion_tampoco():
+    """un punto o un guion de más no cambian de qué se está hablando"""
+    _con_catalogo("PAGO IMSS")
+    assert conceptos.canonico("Pago  I.M.S.S.") == "PAGO IMSS"
+
+
+def probar_dos_conceptos_distintos_siguen_siendo_distintos():
+    """se ignora cómo está escrito, no lo que dice"""
+    _con_catalogo("PAGO IMSS", "PAGO SAR")
+    assert conceptos.canonico("PAGO INFONAVIT") == "PAGO INFONAVIT"
+
+
+def probar_un_concepto_que_no_esta_en_el_catalogo_se_respeta():
+    """puede ser uno recién dado de alta en SIPP y aún sin importar"""
+    _con_catalogo("PAGO IMSS")
+    assert conceptos.canonico("CONCEPTO NUEVO") == "CONCEPTO NUEVO"
+
+
+def probar_el_catalogo_reconoce_el_concepto_con_acentos():
+    """si no, se marcaría «sin verificar» un concepto que sí existe"""
+    _con_catalogo("APOYO DE UTILES POR EXCELENCIA ACADEMICA")
+    assert conceptos.existe("APOYO DE ÚTILES POR EXCELENCIA ACADÉMICA")
+
+
+def probar_un_concepto_acortado_encuentra_el_del_catalogo():
+    """en el Excel se escribe «PAGO PTU» y en SIPP está como «PAGO DE PTU»"""
+    _con_catalogo("PAGO DE PTU")
+    assert conceptos.canonico("PAGO PTU") == "PAGO DE PTU"
+
+
+def probar_con_dos_candidatos_no_se_adivina():
+    """elegir mal manda el dinero a otro concepto y no lo nota nadie"""
+    _con_catalogo("PAGO DE PTU 2025", "PAGO DE PTU 2026")
+    assert conceptos.canonico("PAGO PTU") == "PAGO PTU"
