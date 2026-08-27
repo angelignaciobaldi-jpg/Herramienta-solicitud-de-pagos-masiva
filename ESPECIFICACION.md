@@ -788,6 +788,22 @@ cada uno se conserva solo como rastro informativo, en el tooltip de su origen.
 - En el formulario de captura el control es un desplegable **editable**: ofrece
   el catálogo y filtra al escribir, pero no impide capturar uno que no esté.
 
+
+**El mismo concepto escrito de otra forma se empareja solo.** El Excel del área
+trae los conceptos con acentos y el catálogo de SIPP no los tiene, así que al
+ingerir se guarda el nombre **tal y como está en el catálogo**
+(`conceptos.canonico`). Se ignoran acentos, capitalización y puntuación —
+«Pago I.M.S.S.» es «PAGO IMSS»— y, si el Excel lo trae acortado, se acepta la
+coincidencia por palabras **solo cuando es única**: con dos candidatos no se
+adivina, porque elegir mal manda el dinero a otro concepto y no lo nota nadie.
+
+Guardar el texto crudo dejaba la partida con un nombre que no era ninguna de las
+opciones del desplegable: el campo se pintaba vacío aunque el importe sí
+estuviera, y abrir la solicitud y guardar **borraba el concepto** sin avisar
+(27/08/2026). El desplegable incluye ahora el valor que ya trae la partida entre
+sus opciones, para que eso no pueda pasar aunque el catálogo no se haya
+importado.
+
 ### Modal de carga masiva de solicitudes
 
 Se abre desde el botón **Carga masiva** de la toolbar del lote. Tres pasos, y

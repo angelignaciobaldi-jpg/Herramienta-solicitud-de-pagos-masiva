@@ -45,12 +45,26 @@ class _RenglonPartida:
             # no falla al capturarlo, falla a media corrida—, pero sigue
             # permitiendo escribir uno que aún no se ha importado.
             catalogo = conceptos.nombres()
+            # El concepto que ya trae la partida entra como opción si el
+            # catálogo no lo tiene. Un `Dropdown` cuyo `value` no está entre sus
+            # opciones se pinta VACÍO, y al guardar devolvía vacío: abrir una
+            # solicitud importada y darle a guardar le borraba el concepto sin
+            # que nada lo dijera. Pasa siempre que el catálogo no se ha
+            # importado, y pasaba también con el mismo concepto escrito con
+            # acentos (reportado el 27/08/2026).
+            # Y se enseña como lo tiene SIPP: una solicitud importada antes
+            # de este arreglo trae el concepto con los acentos del Excel, y
+            # verlo escrito de otra forma que en el portal invita a «corregirlo»
+            # a mano.
+            puesto = conceptos.canonico(self.partida.concepto_nombre)
+            if puesto and puesto not in catalogo:
+                catalogo = [puesto] + catalogo
             self.tf_nombre = ft.Dropdown(
                 options=[ft.DropdownOption(key=n, text=n) for n in catalogo],
                 editable=True, enable_filter=True, expand=True,
                 hint_text=("Concepto de pago (elige o escribe)" if catalogo
                            else "Concepto de pago — el catálogo está vacío"),
-                value=self.partida.concepto_nombre or None)
+                value=puesto or None)
             extras: list[ft.Control] = []
         else:
             _, self.tf_nombre = campo_texto(hint="Insumo o servicio", expand=True)
