@@ -1665,15 +1665,66 @@ class FlujoSolicitudPago:
             pass
 
     def _llenar_conceptos(self, conceptos: list[Partida]) -> None:
-        """Captura los importes en el grid de Conceptos de Pago.
+        """Captura los conceptos de pago y sus importes.
 
-        Aquí está el detalle que decide si la solicitud se guarda con importe o
-        en $0: además de teclear el importe hay que **seleccionar** el renglón
-        con su celda de selección, porque SIPP suma solo los conceptos
-        seleccionados.
+        SIPP tiene DOS versiones de esta pestaña y el robot atiende a las dos,
+        porque no cambian a la vez: stage estrenó la nueva el 07/09/2026 y
+        producción puede seguir con la anterior hasta que le toque.
+
+        - **Con combo** (la nueva): el grid empieza vacío y cada concepto se
+          añade eligiéndolo en un desplegable. El renglón nace ya contando para
+          el total, y la última columna es un botón de QUITAR.
+        - **Sin combo** (la anterior): el grid trae todos los conceptos de la
+          empresa y hay que marcar la casilla de cada uno, porque SIPP solo suma
+          los seleccionados.
+
+        La diferencia no es cosmética: en la versión nueva, clicar la última
+        columna —que es lo que había que hacer en la vieja— BORRA el renglón.
         """
         s = self.s
         s.abrir_pestana("conceptos")
+        if s.existe("con.combo"):
+            self._conceptos_por_combo(conceptos)
+        else:
+            self._conceptos_por_casilla(conceptos)
+        self._blindar_total(conceptos)
+
+    def _conceptos_por_combo(self, conceptos: list[Partida]) -> None:
+        """Añade cada concepto desde el desplegable y le teclea su importe."""
+        s = self.s
+        for concepto in conceptos:
+            self.abortar_si_cancelan()
+            nombre = concepto.concepto_nombre
+            try:
+                s.seleccionar_chosen("con.combo", nombre, "Concepto de pago")
+            except Cancelado:
+                raise
+            except Exception as exc:  # noqa: BLE001 — se explica y se corta
+                s.diagnostico("concepto_no_esta_en_el_combo")
+                raise RequiereRevision(
+                    f"La empresa no tiene el concepto «{nombre}» en su lista de "
+                    f"conceptos de pago, así que no se puede capturar: {exc}"
+                ) from exc
+            # El renglón lo agrega SIPP al elegir: se espera a verlo antes de
+            # buscarlo, o se buscaría en un grid que todavía no lo tiene.
+            s.esperar_a(lambda n=nombre: self._fila_concepto(n) is not None,
+                        tope_ms=8000, intervalo_ms=300)
+            fila = self._fila_concepto(nombre)
+            if fila is None:
+                s.diagnostico("concepto_no_se_agrego")
+                raise ErrorRpa(
+                    f"Se eligió «{nombre}» en la lista pero SIPP no agregó su "
+                    f"renglón al desglose.")
+            self._teclear_importe(fila, concepto)
+
+    def _conceptos_por_casilla(self, conceptos: list[Partida]) -> None:
+        """Versión anterior: el grid ya trae los conceptos y hay que marcarlos.
+
+        Aquí está el detalle que decide si la solicitud se guarda con importe o
+        en $0: además de teclear el importe hay que **seleccionar** el renglón
+        con su celda de selección, porque SIPP suma solo los seleccionados.
+        """
+        s = self.s
         grid = s.loc("con.filas")
         for _ in range(24):                     # hasta ~12s a que cargue
             if grid.count() > 0:
@@ -1691,41 +1742,7 @@ class FlujoSolicitudPago:
                     f"La empresa no tiene un concepto que coincida con "
                     f"«{concepto.concepto_nombre}». Se recorrió el grid "
                     f"completo, no solo lo que se veía en pantalla.")
-            # NO se vuelve a desplazar: `_fila_concepto` ya dejó el renglón a
-            # la vista, y mover el grid otra vez lo recicla y descoloca.
-            # Se COMPRUEBA una última vez antes de teclear, porque aquí se
-            # escribe dinero: poner el importe en el concepto equivocado no lo
-            # notaría nadie hasta que el pago estuviera hecho.
-            if not self._fila_cuadra(fila, self._palabras_de(
-                    concepto.concepto_nombre)):
-                s.diagnostico("concepto_cambio_de_renglon")
-                raise ErrorRpa(
-                    f"El renglón de «{concepto.concepto_nombre}» dejó de ser "
-                    f"ese al desplazar el grid. No se captura el importe para "
-                    f"no ponerlo en el concepto equivocado.")
-            campo = fila.locator(selectores.css("con.importe")).first
-            # Se TECLEA: la directiva de moneda de SIPP necesita pulsaciones
-            # reales; con fill() el modelo no confirma el importe.
-            # El tope es corto a propósito: si el campo no admite el clic, es
-            # que el renglón no está donde creemos, y esperar el minuto entero
-            # solo retrasa el diagnóstico —así moría la solicitud antes—.
-            try:
-                campo.click(timeout=10000)
-            except Cancelado:
-                raise
-            except Exception as exc:  # noqa: BLE001 — se explica y se corta
-                s.diagnostico("concepto_no_editable")
-                raise ErrorRpa(
-                    f"Se encontró «{concepto.concepto_nombre}» en el grid pero "
-                    f"su campo de importe no admitió la captura: {exc}"
-                ) from exc
-            try:
-                campo.press("Control+a")
-            except Exception:  # noqa: BLE001
-                pass
-            campo.type(f"{concepto.importe:.2f}", delay=30)
-            campo.press("Tab")                  # el blur confirma el importe
-            s.page.wait_for_timeout(400)
+            campo = self._teclear_importe(fila, concepto)
 
             # Seleccionar el renglón. OJO: hay que clicar la CELDA DE SELECCIÓN;
             # clicar el nombre o cualquier otra celda lo DESELECCIONA en ng-grid
@@ -1740,7 +1757,44 @@ class FlujoSolicitudPago:
                 fila.locator(selectores.css("con.seleccion")).first.click()
                 s.page.wait_for_timeout(500)
 
-        self._blindar_total(conceptos)
+    def _teclear_importe(self, fila, concepto: Partida):
+        """Escribe el importe en el renglón y devuelve su campo."""
+        s = self.s
+        # NO se vuelve a desplazar: `_fila_concepto` ya dejó el renglón a la
+        # vista, y mover el grid otra vez lo recicla y descoloca.
+        # Se COMPRUEBA una última vez antes de teclear, porque aquí se escribe
+        # dinero: poner el importe en el concepto equivocado no lo notaría nadie
+        # hasta que el pago estuviera hecho.
+        if not self._fila_cuadra(fila, self._palabras_de(
+                concepto.concepto_nombre)):
+            s.diagnostico("concepto_cambio_de_renglon")
+            raise ErrorRpa(
+                f"El renglón de «{concepto.concepto_nombre}» dejó de ser ese al "
+                f"desplazar el grid. No se captura el importe para no ponerlo "
+                f"en el concepto equivocado.")
+        campo = fila.locator(selectores.css("con.importe")).first
+        # Se TECLEA: la directiva de moneda de SIPP necesita pulsaciones reales;
+        # con fill() el modelo no confirma el importe.
+        # El tope es corto a propósito: si el campo no admite el clic, es que el
+        # renglón no está donde creemos, y esperar el minuto entero solo retrasa
+        # el diagnóstico —así moría la solicitud antes—.
+        try:
+            campo.click(timeout=10000)
+        except Cancelado:
+            raise
+        except Exception as exc:  # noqa: BLE001 — se explica y se corta
+            s.diagnostico("concepto_no_editable")
+            raise ErrorRpa(
+                f"Se encontró «{concepto.concepto_nombre}» en el grid pero su "
+                f"campo de importe no admitió la captura: {exc}") from exc
+        try:
+            campo.press("Control+a")
+        except Exception:  # noqa: BLE001
+            pass
+        campo.type(f"{concepto.importe:.2f}", delay=30)
+        campo.press("Tab")                  # el blur confirma el importe
+        s.page.wait_for_timeout(400)
+        return campo
 
     @staticmethod
     def _palabras_de(texto: str) -> list[str]:

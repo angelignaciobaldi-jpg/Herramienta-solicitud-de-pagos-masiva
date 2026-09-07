@@ -781,6 +781,23 @@ que no encaje en ningún grupo cae en «sin procesar» en vez de desaparecer.
 `LLENADA` va con las de revisar —el formulario se llenó, pero espera a que
 alguien lo guarde— y no con las que no se intentaron.
 
+### La pestaña de conceptos tiene dos versiones
+
+SIPP la cambió y las dos conviven —stage estrenó la nueva el **07/09/2026** y
+producción puede tardar—, así que el motor atiende a las dos y elige por lo que
+encuentra en pantalla:
+
+| | Cómo se captura | Última columna |
+|---|---|---|
+| **Con desplegable** (nueva) | El grid nace vacío; cada concepto se añade eligiéndolo en un `select`, y el renglón ya cuenta para el total | **Quitar Concepto de Pago** |
+| **Con casilla** (anterior) | El grid trae todos los conceptos de la empresa y hay que marcar cada uno, porque SIPP solo suma los seleccionados | Casilla de selección |
+
+La diferencia **no es cosmética**: en la versión nueva, clicar la última columna
+—que es exactamente lo que había que hacer en la vieja— borra el renglón recién
+agregado. Y la importación del catálogo lee las opciones del desplegable cuando
+existe: leerlo del grid, como antes, devolvía CERO y la herramienta informaba de
+que la empresa no tenía conceptos asignados.
+
 ### Catálogo de conceptos de pago
 
 SIPP asigna los conceptos **por empresa** y no ofrece forma de consultarlos sin

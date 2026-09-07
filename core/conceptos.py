@@ -204,6 +204,42 @@ def importar(nombres_sipp: list[str], empresa: str) -> dict:
 # --------------------------------------------------------------------------- #
 #  Lectura desde SIPP
 # --------------------------------------------------------------------------- #
+def _leer_conceptos(s, selectores) -> list[str]:
+    """Los conceptos que la empresa tiene asignados, de donde el portal los deje.
+
+    SIPP cambió esta pestaña y las dos formas conviven —stage estrenó la nueva
+    el 07/09/2026, producción puede tardar—, así que se mira primero la que da
+    la lista completa de una vez:
+
+    - **Desplegable** (la nueva): el grid arranca vacío y los conceptos viven en
+      las opciones de un `select`. Leerlo del grid, como antes, devolvía CERO y
+      la importación decía que la empresa no tenía ninguno.
+    - **Grid** (la anterior): la lista ya está puesta y hay que recorrerla con
+      scroll, porque ng-grid solo mantiene en el DOM las filas visibles.
+    """
+    if s.existe("con.combo"):
+        try:
+            opciones = s.loc("con.combo").first.locator(
+                "option").all_inner_texts()
+        except Exception:  # noqa: BLE001 — se intenta con el grid
+            opciones = []
+        vistos = []
+        for texto in opciones:
+            limpio = normalizar(texto)
+            # «Seleccionar» es el marcador de posición del desplegable.
+            if limpio and limpio != "SELECCIONAR" and limpio not in vistos:
+                vistos.append(limpio)
+        if vistos:
+            return vistos
+
+    grid = s.loc("con.filas")
+    for _ in range(24):                  # hasta ~12s a que cargue
+        if grid.count() > 0:
+            break
+        s.page.wait_for_timeout(500)
+    return _leer_grid_con_scroll(s, grid, selectores)
+
+
 def _leer_grid_con_scroll(s, grid, selectores) -> list[str]:
     """Todos los conceptos del grid, no solo los que caben en pantalla.
 
@@ -306,12 +342,7 @@ def leer_de_sipp(usuario: str, contrasena: str, *, url_login: str,
                 s.page.wait_for_timeout(1500)
                 s.cerrar_alertas()
                 s.abrir_pestana("conceptos")
-                grid = s.loc("con.filas")
-                for _ in range(24):      # hasta ~12s a que cargue
-                    if grid.count() > 0:
-                        break
-                    s.page.wait_for_timeout(500)
-                for nombre in _leer_grid_con_scroll(s, grid, selectores):
+                for nombre in _leer_conceptos(s, selectores):
                     if nombre not in encontrados:
                         encontrados.append(nombre)
     except ErrorRpa as exc:

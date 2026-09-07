@@ -1420,3 +1420,208 @@ def probar_los_acentos_no_impiden_reconocer_al_beneficiario():
     buscado = rpa_sipp._palabras_clave("MARÍA GARCÍA PÉREZ")
     renglon = rpa_sipp._palabras_clave("12  MARIA GARCIA PEREZ")
     assert buscado.issubset(renglon)
+
+
+# --------------------------------------------------------------------------- #
+#  Las dos versiones de la pestaña de conceptos
+# --------------------------------------------------------------------------- #
+# SIPP cambió esta pestaña y las dos formas conviven: stage estrenó la nueva el
+# 07/09/2026 y producción puede tardar. La diferencia no es cosmética — en la
+# nueva, clicar la última columna, que es lo que había que hacer en la vieja,
+# BORRA el renglón.
+class _Importe:
+    def __init__(self, fila):
+        self.fila = fila
+
+    @property
+    def first(self):
+        return self
+
+    def click(self, **_kw):
+        pass
+
+    def press(self, _tecla):
+        pass
+
+    def type(self, texto, **_kw):
+        self.fila.importe = texto
+
+    def input_value(self):
+        return self.fila.importe
+
+    def evaluate(self, _js):
+        return self.fila.marcada
+
+
+class _Quitar:
+    def __init__(self, fila):
+        self.fila = fila
+
+    @property
+    def first(self):
+        return self
+
+    def click(self, **_kw):
+        self.fila.marcada = True
+        self.fila.clics_columna += 1
+
+
+class _FilaConcepto:
+    def __init__(self, nombre):
+        self.texto = nombre
+        self.importe = ""
+        self.marcada = False
+        self.clics_columna = 0
+
+    def locator(self, css):
+        clave = css.lower()
+        if "nombre" in clave:
+            texto = self.texto
+
+            class _Nombre:
+                @property
+                def first(_s):
+                    return _s
+
+                def inner_text(_s):
+                    return texto
+
+            return _Nombre()
+        if "importe" in clave:
+            return _Importe(self)
+        return _Quitar(self)
+
+    def bounding_box(self):
+        return {"x": 0, "y": 0, "width": 800, "height": 30}
+
+
+class _SesionConceptos:
+    """Doble de la pestaña, en sus dos versiones."""
+
+    def __init__(self, catalogo, con_combo=True, ya_en_grid=False):
+        self.catalogo = list(catalogo)
+        self.con_combo = con_combo
+        self.filas = [_FilaConcepto(n) for n in catalogo] if ya_en_grid else []
+        self.elegidos = []
+        self.diagnosticos = []
+        self.page = self
+        self.cancelado = None
+
+    # --- lo que usa el motor ---
+    def existe(self, clave, dentro=None):
+        return clave == "con.combo" and self.con_combo
+
+    def abrir_pestana(self, _n):
+        pass
+
+    def seleccionar_chosen(self, _clave, texto, _desc, **_kw):
+        if texto not in self.catalogo:
+            raise RuntimeError(f"«{texto}» no está en la lista")
+        self.elegidos.append(texto)
+        self.filas.append(_FilaConcepto(texto))
+
+    def loc(self, clave, dentro=None):
+        ses = self
+
+        class _Filas:
+            def count(_s):
+                return len(ses.filas)
+
+            def nth(_s, i):
+                return ses.filas[i]
+
+            @property
+            def first(_s):
+                return type("T", (), {"input_value": lambda _x: "0"})()
+
+        return _Filas()
+
+    def locator(self, _css):
+        return type("V", (), {"count": lambda _s: 0,
+                              "first": type("F", (), {"count": lambda _x: 0})()})()
+
+    def esperar_a(self, condicion, tope_ms=0, intervalo_ms=0):
+        return bool(condicion())
+
+    def wait_for_timeout(self, _ms):
+        pass
+
+    def abortar_si_cancelan(self):
+        pass
+
+    def anotar(self, *_a, **_kw):
+        pass
+
+    def diagnostico(self, nombre):
+        self.diagnosticos.append(nombre)
+
+    def visible_(self, _clave):
+        return False
+
+
+def _partida(nombre, importe):
+    return db.Partida(clase=db.CONCEPTO, concepto_nombre=nombre,
+                      importe=importe, origen="MANUAL")
+
+
+def _flujo_conceptos(ses):
+    flujo = rpa_sipp.FlujoSolicitudPago(ses)
+    flujo._blindar_total = lambda _c: None      # toca el portal; se prueba aparte
+    return flujo
+
+
+_CATALOGO = ["ISR RETENCIONES POR SALARIOS", "VIGILANCIA", "PAGO IMSS"]
+
+
+def probar_cada_concepto_se_agrega_desde_el_desplegable():
+    """en la versión nueva el grid nace vacío: hay que añadirlos"""
+    ses = _SesionConceptos(_CATALOGO)
+    with _SinMapa():
+        _flujo_conceptos(ses)._llenar_conceptos([
+            _partida("ISR RETENCIONES POR SALARIOS", 232.0),
+            _partida("VIGILANCIA", 100.0)])
+    assert ses.elegidos == ["ISR RETENCIONES POR SALARIOS", "VIGILANCIA"]
+    assert [f.importe for f in ses.filas] == ["232.00", "100.00"]
+
+
+def probar_no_se_toca_la_columna_que_ahora_borra_el_renglon():
+    """en la versión nueva esa columna es «Quitar Concepto de Pago»"""
+    ses = _SesionConceptos(_CATALOGO)
+    with _SinMapa():
+        _flujo_conceptos(ses)._llenar_conceptos([_partida("VIGILANCIA", 50.0)])
+    assert all(f.clics_columna == 0 for f in ses.filas), (
+        "clicar ahí borraría el concepto recién agregado")
+
+
+def probar_un_concepto_que_no_ofrece_la_empresa_se_explica():
+    """no se puede capturar y hay que decir por qué"""
+    ses = _SesionConceptos(_CATALOGO)
+    try:
+        with _SinMapa():
+            _flujo_conceptos(ses)._llenar_conceptos(
+                [_partida("CONCEPTO INVENTADO", 10.0)])
+        assert False, "debió detenerse"
+    except rpa_sipp.RequiereRevision as exc:
+        assert "CONCEPTO INVENTADO" in str(exc)
+
+
+def probar_la_version_anterior_sigue_funcionando():
+    """producción puede tardar en cambiar, y ahí hay que marcar la casilla"""
+    ses = _SesionConceptos(_CATALOGO, con_combo=False, ya_en_grid=True)
+    with _SinMapa():
+        _flujo_conceptos(ses)._llenar_conceptos([_partida("VIGILANCIA", 75.0)])
+    assert not ses.elegidos, "sin combo no hay nada que elegir"
+    fila = next(f for f in ses.filas if f.texto == "VIGILANCIA")
+    assert fila.importe == "75.00"
+    assert fila.clics_columna == 1, "aquí SÍ hay que marcar el renglón"
+
+
+def probar_sin_conceptos_y_sin_combo_no_se_captura_en_cero():
+    """una solicitud en $0 se ve capturada y hay que cancelarla a mano"""
+    ses = _SesionConceptos([], con_combo=False)
+    try:
+        with _SinMapa():
+            _flujo_conceptos(ses)._llenar_conceptos([_partida("VIGILANCIA", 1.0)])
+        assert False, "debió detenerse"
+    except rpa_sipp.RequiereRevision as exc:
+        assert "$0" in str(exc) or "vacío" in str(exc)
