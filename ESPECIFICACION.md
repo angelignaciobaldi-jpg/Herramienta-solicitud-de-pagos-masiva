@@ -461,6 +461,29 @@ Para elegir la cuenta de un beneficiario existente se empareja por CLABE. Si la
 solicitud no la trae y el beneficiario tiene **una sola** cuenta, se usa esa; si
 tiene varias, `REVISAR`.
 
+
+**Tres candados para que el pago salga a nombre de quien es.** En producción
+aparecieron acreedores ya existentes con cuentas bancarias de otras personas, y
+solicitudes a nombre del acreedor equivocado (28/08/2026). Dar de alta a un
+beneficiario arrastra el registro de su cuenta, así que si el formulario tiene
+otro seleccionado, la cuenta se le cuelga a ÉL:
+
+1. **Nada empieza sobre el formulario anterior.** `asegurar_modo_agregar` pulsa
+   «Crear» solo si lo ve, y cuando volver al listado falla —cosa que se traga a
+   propósito— el formulario se reutiliza con su beneficiario puesto. Ahora se
+   comprueba el folio, se intenta empezar de nuevo una vez y, si sigue ahí, se
+   para.
+2. **El renglón del buscador se lee ANTES del doble clic.** Un solo resultado no
+   significa que sea el correcto: si la búsqueda no llegó a filtrar, lo que
+   queda en el grid es el resultado anterior. Además, la selección se confirma
+   por FOLIO, que es la única señal de que SIPP tomó al beneficiario; el nombre
+   puede quedarse pintado del anterior.
+3. **No se da de alta ni se registra cuenta con un folio puesto.** Se comprueba
+   al empezar el alta y otra vez pegado al modal de la cuenta, que es el paso
+   que escribe de verdad, y se exige que el panel esté en modo «No Registrado».
+
+Más vale una solicitud sin capturar que una capturada a nombre de otro.
+
 ### Punto de parada
 
 - `AUTORIZAR` **exige el Vo.Bo. de Compras**: SIPP no envía a autorización un

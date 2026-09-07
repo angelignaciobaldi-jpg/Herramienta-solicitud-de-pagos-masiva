@@ -1251,3 +1251,172 @@ def probar_lo_que_ya_esta_a_la_vista_no_se_mueve():
         flujo, grid = _flujo_grid(_MUCHOS, virtualiza=False)
         fila = flujo._fila_concepto("CONCEPTO 01")
         assert fila is not None and grid.scroll == 0
+
+
+# --------------------------------------------------------------------------- #
+#  El pago tiene que salir a nombre de quien es
+# --------------------------------------------------------------------------- #
+# Reportado en producción: aparecieron acreedores ya existentes con cuentas
+# bancarias de otras personas, y solicitudes a nombre del acreedor equivocado
+# con la cuenta correcta. Dar de alta un beneficiario arrastra el registro de su
+# cuenta, y si el formulario tiene otro seleccionado, la cuenta se le cuelga a
+# ÉL. Estas pruebas fijan los candados que lo impiden.
+class _SesionBeneficiario:
+    """Doble de sesión centrado en el panel de beneficiario."""
+
+    def __init__(self, folio="", nombre="", no_registrado=True):
+        self.folio = folio
+        self.nombre = nombre
+        self.no_registrado = no_registrado
+        self.avisos = []
+        self.diagnosticos = []
+        self.clics = []
+        self.page = type("P", (), {"wait_for_timeout": lambda _s, _ms: None})()
+
+    def loc(self, clave, dentro=None):
+        ses = self
+
+        class _Campo:
+            def input_value(_s):
+                return ses.folio if clave == "ben.folio" else ses.nombre
+
+            def is_checked(_s):
+                return ses.no_registrado
+
+            def click(_s, **_kw):
+                ses.clics.append(clave)
+
+        campo = _Campo()
+
+        class _Lista:
+            # Los tres paneles de beneficiario repiten el mismo campo, así que
+            # el motor los recorre en vez de mirar solo el primero.
+            def count(_s):
+                return 1
+
+            def nth(_s, _i):
+                return campo
+
+            @property
+            def first(_s):
+                return campo
+
+        return _Lista()
+
+    def llenar(self, *_a, **_kw):
+        raise AssertionError("no se debe escribir nada tras el candado")
+
+    def existe(self, *_a, **_kw):
+        return False
+
+    def anotar(self, _paso, mensaje, _nivel=None):
+        self.avisos.append(mensaje)
+
+    def diagnostico(self, nombre):
+        self.diagnosticos.append(nombre)
+
+    def cerrar_alertas(self, vueltas=6):
+        pass
+
+
+def _flujo_ben(sesion):
+    return rpa_sipp.FlujoSolicitudPago(sesion)
+
+
+def probar_no_se_da_de_alta_encima_de_un_beneficiario_existente():
+    """la cuenta acabaría registrada en el acreedor equivocado"""
+    ses = _SesionBeneficiario(folio="165", nombre="Observatorio Express")
+    s = comun.solicitud(comun.lote().id, "PARIS GARCIA AGIS")
+    try:
+        _flujo_ben(ses)._alta_beneficiario(s, None, {})
+        assert False, "debió detenerse"
+    except rpa_sipp.RequiereRevision as exc:
+        assert "165" in str(exc), "hay que decir con cuál se topó"
+        assert "PARIS GARCIA AGIS" in str(exc)
+    assert not ses.clics, "y no haber tocado nada del formulario"
+
+
+def probar_la_cuenta_no_se_registra_si_hay_un_folio_puesto():
+    """es el paso que escribe: se vuelve a mirar justo antes"""
+    ses = _SesionBeneficiario(folio="166", nombre="OPERACIONES TEMATICAS MZT")
+    s = comun.solicitud(comun.lote().id, "FILIBERTO CAZAREZ NIEBLAS")
+    try:
+        _flujo_ben(ses)._alta_cuenta_bancaria(s, None, {})
+        assert False, "debió detenerse"
+    except rpa_sipp.RequiereRevision as exc:
+        assert "166" in str(exc)
+    assert not ses.clics
+
+
+def probar_sin_no_registrado_la_cuenta_no_seria_suya():
+    """el modo del panel decide de quién es la cuenta que se captura"""
+    ses = _SesionBeneficiario(no_registrado=False)
+    s = comun.solicitud(comun.lote().id, "ANA LOPEZ")
+    try:
+        _flujo_ben(ses)._alta_cuenta_bancaria(s, None, {})
+        assert False, "debió detenerse"
+    except rpa_sipp.RequiereRevision as exc:
+        assert "No Registrado" in str(exc)
+
+
+def probar_con_el_formulario_limpio_el_alta_sigue_su_curso():
+    """el camino normal no cambia"""
+    ses = _SesionBeneficiario(folio="", no_registrado=True)
+    s = comun.solicitud(comun.lote().id, "ANA LOPEZ")
+    flujo = _flujo_ben(ses)
+    # Solo se comprueba que pasa el candado; lo que sigue toca el portal.
+    try:
+        flujo._alta_cuenta_bancaria(s, None, {})
+    except rpa_sipp.RequiereRevision as exc:
+        assert False, f"no debía detenerse: {exc}"
+    except Exception:  # noqa: BLE001 — el doble no llega más allá del candado
+        pass
+    assert "ben.agregar_cuenta" in ses.clics or ses.clics == []
+
+
+def probar_una_solicitud_no_empieza_sobre_el_formulario_de_la_anterior():
+    """lo que se capture encima se le cuelga al beneficiario que quedó"""
+    ses = _SesionBeneficiario(folio="165", nombre="Observatorio Express")
+    flujo = _flujo_ben(ses)
+    flujo.volver_al_listado = lambda: None          # el doble no navega
+    flujo.asegurar_modo_agregar = lambda: None
+    s = comun.solicitud(comun.lote().id, "PARIS GARCIA AGIS")
+    try:
+        flujo._exigir_formulario_limpio(s)
+        assert False, "debió detenerse"
+    except rpa_sipp.RequiereRevision as exc:
+        assert "165" in str(exc)
+    assert any("se empieza de nuevo" in a for a in ses.avisos), (
+        "y haberlo intentado antes de rendirse")
+
+
+def probar_el_formulario_limpio_no_estorba():
+    """sin beneficiario puesto, no hay nada que reiniciar"""
+    ses = _SesionBeneficiario(folio="")
+    s = comun.solicitud(comun.lote().id, "ANA LOPEZ")
+    _flujo_ben(ses)._exigir_formulario_limpio(s)
+    assert not ses.avisos
+
+
+def probar_un_renglon_ajeno_no_cuenta_como_coincidencia():
+    """un solo resultado no significa que sea el correcto"""
+    # Es el caso de producción: se buscaba a una persona y el buscador tenía
+    # todavía el resultado anterior, una empresa. El doble clic la habría
+    # elegido y el pago habría salido a su nombre.
+    buscado = rpa_sipp._palabras_clave("PARIS GARCIA AGIS")
+    renglon = rpa_sipp._palabras_clave("165  Observatorio Express")
+    assert not buscado.issubset(renglon)
+
+
+def probar_el_renglon_correcto_si_cuenta():
+    """el listado añade folio y razón social; eso no lo hace otro"""
+    buscado = rpa_sipp._palabras_clave("OPERACIONES TEMATICAS MZT")
+    renglon = rpa_sipp._palabras_clave("166  OPERACIONES TEMATICAS MZT SA DE CV")
+    assert buscado.issubset(renglon)
+
+
+def probar_los_acentos_no_impiden_reconocer_al_beneficiario():
+    """el Excel los trae y el listado de SIPP no siempre"""
+    buscado = rpa_sipp._palabras_clave("MARÍA GARCÍA PÉREZ")
+    renglon = rpa_sipp._palabras_clave("12  MARIA GARCIA PEREZ")
+    assert buscado.issubset(renglon)
