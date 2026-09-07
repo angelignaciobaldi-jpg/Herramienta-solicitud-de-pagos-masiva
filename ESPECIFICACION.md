@@ -461,6 +461,29 @@ Para elegir la cuenta de un beneficiario existente se empareja por CLABE. Si la
 solicitud no la trae y el beneficiario tiene **una sola** cuenta, se usa esa; si
 tiene varias, `REVISAR`.
 
+
+**Tres candados para que el pago salga a nombre de quien es.** En producción
+aparecieron acreedores ya existentes con cuentas bancarias de otras personas, y
+solicitudes a nombre del acreedor equivocado (28/08/2026). Dar de alta a un
+beneficiario arrastra el registro de su cuenta, así que si el formulario tiene
+otro seleccionado, la cuenta se le cuelga a ÉL:
+
+1. **Nada empieza sobre el formulario anterior.** `asegurar_modo_agregar` pulsa
+   «Crear» solo si lo ve, y cuando volver al listado falla —cosa que se traga a
+   propósito— el formulario se reutiliza con su beneficiario puesto. Ahora se
+   comprueba el folio, se intenta empezar de nuevo una vez y, si sigue ahí, se
+   para.
+2. **El renglón del buscador se lee ANTES del doble clic.** Un solo resultado no
+   significa que sea el correcto: si la búsqueda no llegó a filtrar, lo que
+   queda en el grid es el resultado anterior. Además, la selección se confirma
+   por FOLIO, que es la única señal de que SIPP tomó al beneficiario; el nombre
+   puede quedarse pintado del anterior.
+3. **No se da de alta ni se registra cuenta con un folio puesto.** Se comprueba
+   al empezar el alta y otra vez pegado al modal de la cuenta, que es el paso
+   que escribe de verdad, y se exige que el panel esté en modo «No Registrado».
+
+Más vale una solicitud sin capturar que una capturada a nombre de otro.
+
 ### Punto de parada
 
 - `AUTORIZAR` **exige el Vo.Bo. de Compras**: SIPP no envía a autorización un
@@ -757,6 +780,23 @@ Los estados se reparten así, y el reparto **suma siempre el total**: un estado
 que no encaje en ningún grupo cae en «sin procesar» en vez de desaparecer.
 `LLENADA` va con las de revisar —el formulario se llenó, pero espera a que
 alguien lo guarde— y no con las que no se intentaron.
+
+### La pestaña de conceptos tiene dos versiones
+
+SIPP la cambió y las dos conviven —stage estrenó la nueva el **07/09/2026** y
+producción puede tardar—, así que el motor atiende a las dos y elige por lo que
+encuentra en pantalla:
+
+| | Cómo se captura | Última columna |
+|---|---|---|
+| **Con desplegable** (nueva) | El grid nace vacío; cada concepto se añade eligiéndolo en un `select`, y el renglón ya cuenta para el total | **Quitar Concepto de Pago** |
+| **Con casilla** (anterior) | El grid trae todos los conceptos de la empresa y hay que marcar cada uno, porque SIPP solo suma los seleccionados | Casilla de selección |
+
+La diferencia **no es cosmética**: en la versión nueva, clicar la última columna
+—que es exactamente lo que había que hacer en la vieja— borra el renglón recién
+agregado. Y la importación del catálogo lee las opciones del desplegable cuando
+existe: leerlo del grid, como antes, devolvía CERO y la herramienta informaba de
+que la empresa no tenía conceptos asignados.
 
 ### Catálogo de conceptos de pago
 

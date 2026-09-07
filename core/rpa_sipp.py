@@ -1070,6 +1070,7 @@ class FlujoSolicitudPago:
         archivos = archivos or {}
         s = self.s
         self.asegurar_modo_agregar()
+        self._exigir_formulario_limpio(solicitud)
         # Desde aquí queda constancia de todo lo que SIPP objete, incluidos los
         # avisos que el propio robot cierra al pasar al campo siguiente.
         s.espiar_validaciones()
@@ -1196,6 +1197,41 @@ class FlujoSolicitudPago:
             "ve en pantalla y el portal la descarta. Sin ella rechaza el "
             "guardado sin decir por qué.")
 
+    def _exigir_formulario_limpio(self, solicitud: Solicitud) -> None:
+        """Se niega a empezar una solicitud sobre los restos de la anterior.
+
+        `asegurar_modo_agregar` pulsa «Crear» solo si lo ve; cuando el formulario
+        anterior sigue en pantalla —porque volver al listado falló, y ese fallo
+        se traga a propósito— se reutiliza tal cual, con su beneficiario todavía
+        puesto. A partir de ahí todo lo que se capture se le cuelga a él.
+
+        Se intenta una vez volver al listado y empezar de nuevo; si el
+        beneficiario sigue ahí, se para. Es lo contrario de lo que hacía falta
+        arreglar: más vale una solicitud sin capturar que una capturada a nombre
+        de otro.
+        """
+        s = self.s
+        if not self._folio_beneficiario():
+            return
+        s.anotar("beneficiario",
+                 "El formulario traía un beneficiario de antes; se empieza de "
+                 "nuevo", "WARN")
+        try:
+            self.volver_al_listado()
+            self.asegurar_modo_agregar()
+        except Cancelado:
+            raise
+        except Exception:  # noqa: BLE001 — se comprueba abajo si sirvió
+            pass
+        folio = self._folio_beneficiario()
+        if folio:
+            s.diagnostico("formulario_sucio")
+            raise RequiereRevision(
+                f"El formulario de SIPP sigue con el beneficiario {folio} "
+                f"«{self._beneficiario_en_pantalla()}» de una solicitud "
+                f"anterior. No se captura «{solicitud.beneficiario_nombre}» "
+                f"encima para no mezclar los datos de las dos.")
+
     def _resolver_beneficiario(self, solicitud: Solicitud, panel,
                                archivos: dict) -> None:
         """Decide si el beneficiario ya existe en SIPP y actúa en consecuencia.
@@ -1279,6 +1315,20 @@ class FlujoSolicitudPago:
                            archivos: dict) -> None:
         """Registra un beneficiario nuevo (checkbox «No Registrado»)."""
         s = self.s
+        # CANDADO. Dar de alta arrastra el registro de una cuenta bancaria, y si
+        # el formulario tiene un beneficiario ya existente seleccionado, esa
+        # cuenta se le cuelga A ÉL: acaba con una cuenta que no es suya y la
+        # solicitud sale a nombre de quien no es. Pasó en producción el
+        # 28/08/2026 —los acreedores 165 y 166 amanecieron con cuentas de otras
+        # personas—, así que aquí no se sigue por si acaso: se para.
+        folio = self._folio_beneficiario()
+        if folio:
+            s.diagnostico("alta_sobre_beneficiario_existente")
+            raise RequiereRevision(
+                f"El formulario tiene seleccionado el beneficiario {folio} "
+                f"«{self._beneficiario_en_pantalla()}» y se iba a dar de alta a "
+                f"«{solicitud.beneficiario_nombre}». No se continúa: la cuenta "
+                f"bancaria acabaría registrada en el beneficiario equivocado.")
         s.anotar("beneficiario", f"Alta de «{solicitud.beneficiario_nombre}»")
         chk = s.loc("ben.no_registrado").first
         if not chk.is_checked():
@@ -1349,16 +1399,47 @@ class FlujoSolicitudPago:
         filas = modal.locator(selectores.css("ben.modal_filas"))
         n = filas.count()
         s.anotar("beneficiario", f"{n} coincidencia(s) para «{nombre}»")
-        if n != 1:
+
+        def cerrar_modal() -> None:
             try:
                 modal.locator(selectores.css("ben.modal_cerrar")).click()
                 s.page.wait_for_timeout(800)
             except Exception:  # noqa: BLE001
                 pass
+
+        if n != 1:
+            cerrar_modal()
             return "nuevo" if n == 0 else "ambiguo"
+
+        # Se lee la fila ANTES de elegirla. Un renglón único no significa que
+        # sea el correcto: si la búsqueda no llegó a filtrar, lo que queda en el
+        # grid es el resultado anterior, y el doble clic elegiría a otro. Ese es
+        # el camino por el que una solicitud sale a nombre de quien no es.
+        try:
+            renglon = (filas.first.inner_text() or "").strip()
+        except Exception:  # noqa: BLE001 — el grid se está repintando
+            renglon = ""
+        if not _palabras_clave(nombre).issubset(_palabras_clave(renglon)):
+            cerrar_modal()
+            s.diagnostico("beneficiario_renglon_ajeno")
+            visto = " ".join(renglon.split())[:120]
+            raise RequiereRevision(
+                f"El buscador de SIPP devolvió un solo resultado para "
+                f"«{nombre}» y no es esa persona: «{visto}». No se elige "
+                f"ninguno; revisa el nombre en la solicitud.")
+
         filas.first.dblclick()          # así se elige en ng-grid
         s.page.wait_for_timeout(2000)
         s.cerrar_alertas()
+
+        # El folio es la prueba de que SIPP tomó al beneficiario. Sin él, lo que
+        # se vea escrito en el nombre puede ser de la solicitud anterior.
+        folio = self._folio_beneficiario()
+        if not folio:
+            s.diagnostico("beneficiario_sin_folio")
+            raise ErrorRpa(
+                f"Se eligió «{nombre}» en el buscador pero el formulario no "
+                f"quedó con ningún beneficiario (sin folio).")
 
         # Se COMPRUEBA que quedó seleccionado. Un doble clic que no prende deja
         # el formulario sin beneficiario, y como los demás pasos sí funcionan,
@@ -1373,10 +1454,33 @@ class FlujoSolicitudPago:
         if not _palabras_clave(nombre).issubset(_palabras_clave(elegido)):
             s.diagnostico("beneficiario_distinto")
             raise ErrorRpa(
-                f"Se buscaba «{nombre}» y el formulario quedó con «{elegido}». "
-                f"No se continúa para no capturar el pago a otra persona.")
-        s.anotar("beneficiario", f"Seleccionado: «{elegido}»")
+                f"Se buscaba «{nombre}» y el formulario quedó con el "
+                f"beneficiario {folio} «{elegido}». No se continúa para no "
+                f"capturar el pago a otra persona.")
+        s.anotar("beneficiario", f"Seleccionado: {folio} «{elegido}»")
         return "existente"
+
+    def _folio_beneficiario(self) -> str:
+        """Folio del beneficiario que el formulario tiene seleccionado.
+
+        Vacío significa que no hay ninguno: o el formulario está limpio, o se
+        está capturando uno «No Registrado». Es la señal más fiable de las dos
+        —el nombre puede quedarse pintado— y de ella dependen los candados que
+        impiden mezclar una solicitud con el beneficiario de la anterior.
+        """
+        # Se recorren TODOS los que resuelvan, como con el nombre: los tres
+        # paneles de beneficiario repiten el mismo campo y solo el del panel
+        # activo trae valor. Mirar únicamente el primero devolvía vacío casi
+        # siempre, y un candado que nunca salta no es un candado.
+        try:
+            campos = self.s.loc("ben.folio")
+            for i in range(campos.count()):
+                valor = (campos.nth(i).input_value() or "").strip()
+                if valor:
+                    return valor
+        except Exception:  # noqa: BLE001 — el campo no está en esta pantalla
+            pass
+        return ""
 
     def _beneficiario_en_pantalla(self) -> str:
         """Nombre del beneficiario que el formulario tiene ahora mismo."""
@@ -1402,6 +1506,25 @@ class FlujoSolicitudPago:
                               archivos: dict) -> None:
         """Captura una cuenta bancaria nueva en su modal."""
         s = self.s
+        # Se vuelve a mirar JUSTO antes de escribir. Entre la comprobación del
+        # alta y este punto se ha tocado el formulario —el checkbox, la razón
+        # social, el RFC— y cualquiera de esos pasos puede dejar seleccionado un
+        # beneficiario. Este es el paso que da de alta la cuenta de verdad: si
+        # aquí hay un folio, la cuenta se registraría en ese beneficiario.
+        folio = self._folio_beneficiario()
+        if folio:
+            s.diagnostico("cuenta_sobre_beneficiario_existente")
+            raise RequiereRevision(
+                f"No se registra la cuenta bancaria de "
+                f"«{solicitud.beneficiario_nombre}»: el formulario quedó con el "
+                f"beneficiario {folio} «{self._beneficiario_en_pantalla()}», y "
+                f"la cuenta se le agregaría a él.")
+        if not s.loc("ben.no_registrado").first.is_checked():
+            s.diagnostico("cuenta_sin_no_registrado")
+            raise RequiereRevision(
+                f"No se registra la cuenta bancaria de "
+                f"«{solicitud.beneficiario_nombre}»: el formulario no está en "
+                f"modo «No Registrado», así que la cuenta no sería suya.")
         s.anotar("cuenta", "Capturando la cuenta bancaria")
         panel.locator(selectores.css("ben.agregar_cuenta")).first.click()
         modal = s.loc("cb.modal").first
@@ -1542,15 +1665,66 @@ class FlujoSolicitudPago:
             pass
 
     def _llenar_conceptos(self, conceptos: list[Partida]) -> None:
-        """Captura los importes en el grid de Conceptos de Pago.
+        """Captura los conceptos de pago y sus importes.
 
-        Aquí está el detalle que decide si la solicitud se guarda con importe o
-        en $0: además de teclear el importe hay que **seleccionar** el renglón
-        con su celda de selección, porque SIPP suma solo los conceptos
-        seleccionados.
+        SIPP tiene DOS versiones de esta pestaña y el robot atiende a las dos,
+        porque no cambian a la vez: stage estrenó la nueva el 07/09/2026 y
+        producción puede seguir con la anterior hasta que le toque.
+
+        - **Con combo** (la nueva): el grid empieza vacío y cada concepto se
+          añade eligiéndolo en un desplegable. El renglón nace ya contando para
+          el total, y la última columna es un botón de QUITAR.
+        - **Sin combo** (la anterior): el grid trae todos los conceptos de la
+          empresa y hay que marcar la casilla de cada uno, porque SIPP solo suma
+          los seleccionados.
+
+        La diferencia no es cosmética: en la versión nueva, clicar la última
+        columna —que es lo que había que hacer en la vieja— BORRA el renglón.
         """
         s = self.s
         s.abrir_pestana("conceptos")
+        if s.existe("con.combo"):
+            self._conceptos_por_combo(conceptos)
+        else:
+            self._conceptos_por_casilla(conceptos)
+        self._blindar_total(conceptos)
+
+    def _conceptos_por_combo(self, conceptos: list[Partida]) -> None:
+        """Añade cada concepto desde el desplegable y le teclea su importe."""
+        s = self.s
+        for concepto in conceptos:
+            self.abortar_si_cancelan()
+            nombre = concepto.concepto_nombre
+            try:
+                s.seleccionar_chosen("con.combo", nombre, "Concepto de pago")
+            except Cancelado:
+                raise
+            except Exception as exc:  # noqa: BLE001 — se explica y se corta
+                s.diagnostico("concepto_no_esta_en_el_combo")
+                raise RequiereRevision(
+                    f"La empresa no tiene el concepto «{nombre}» en su lista de "
+                    f"conceptos de pago, así que no se puede capturar: {exc}"
+                ) from exc
+            # El renglón lo agrega SIPP al elegir: se espera a verlo antes de
+            # buscarlo, o se buscaría en un grid que todavía no lo tiene.
+            s.esperar_a(lambda n=nombre: self._fila_concepto(n) is not None,
+                        tope_ms=8000, intervalo_ms=300)
+            fila = self._fila_concepto(nombre)
+            if fila is None:
+                s.diagnostico("concepto_no_se_agrego")
+                raise ErrorRpa(
+                    f"Se eligió «{nombre}» en la lista pero SIPP no agregó su "
+                    f"renglón al desglose.")
+            self._teclear_importe(fila, concepto)
+
+    def _conceptos_por_casilla(self, conceptos: list[Partida]) -> None:
+        """Versión anterior: el grid ya trae los conceptos y hay que marcarlos.
+
+        Aquí está el detalle que decide si la solicitud se guarda con importe o
+        en $0: además de teclear el importe hay que **seleccionar** el renglón
+        con su celda de selección, porque SIPP suma solo los seleccionados.
+        """
+        s = self.s
         grid = s.loc("con.filas")
         for _ in range(24):                     # hasta ~12s a que cargue
             if grid.count() > 0:
@@ -1568,41 +1742,7 @@ class FlujoSolicitudPago:
                     f"La empresa no tiene un concepto que coincida con "
                     f"«{concepto.concepto_nombre}». Se recorrió el grid "
                     f"completo, no solo lo que se veía en pantalla.")
-            # NO se vuelve a desplazar: `_fila_concepto` ya dejó el renglón a
-            # la vista, y mover el grid otra vez lo recicla y descoloca.
-            # Se COMPRUEBA una última vez antes de teclear, porque aquí se
-            # escribe dinero: poner el importe en el concepto equivocado no lo
-            # notaría nadie hasta que el pago estuviera hecho.
-            if not self._fila_cuadra(fila, self._palabras_de(
-                    concepto.concepto_nombre)):
-                s.diagnostico("concepto_cambio_de_renglon")
-                raise ErrorRpa(
-                    f"El renglón de «{concepto.concepto_nombre}» dejó de ser "
-                    f"ese al desplazar el grid. No se captura el importe para "
-                    f"no ponerlo en el concepto equivocado.")
-            campo = fila.locator(selectores.css("con.importe")).first
-            # Se TECLEA: la directiva de moneda de SIPP necesita pulsaciones
-            # reales; con fill() el modelo no confirma el importe.
-            # El tope es corto a propósito: si el campo no admite el clic, es
-            # que el renglón no está donde creemos, y esperar el minuto entero
-            # solo retrasa el diagnóstico —así moría la solicitud antes—.
-            try:
-                campo.click(timeout=10000)
-            except Cancelado:
-                raise
-            except Exception as exc:  # noqa: BLE001 — se explica y se corta
-                s.diagnostico("concepto_no_editable")
-                raise ErrorRpa(
-                    f"Se encontró «{concepto.concepto_nombre}» en el grid pero "
-                    f"su campo de importe no admitió la captura: {exc}"
-                ) from exc
-            try:
-                campo.press("Control+a")
-            except Exception:  # noqa: BLE001
-                pass
-            campo.type(f"{concepto.importe:.2f}", delay=30)
-            campo.press("Tab")                  # el blur confirma el importe
-            s.page.wait_for_timeout(400)
+            campo = self._teclear_importe(fila, concepto)
 
             # Seleccionar el renglón. OJO: hay que clicar la CELDA DE SELECCIÓN;
             # clicar el nombre o cualquier otra celda lo DESELECCIONA en ng-grid
@@ -1617,7 +1757,44 @@ class FlujoSolicitudPago:
                 fila.locator(selectores.css("con.seleccion")).first.click()
                 s.page.wait_for_timeout(500)
 
-        self._blindar_total(conceptos)
+    def _teclear_importe(self, fila, concepto: Partida):
+        """Escribe el importe en el renglón y devuelve su campo."""
+        s = self.s
+        # NO se vuelve a desplazar: `_fila_concepto` ya dejó el renglón a la
+        # vista, y mover el grid otra vez lo recicla y descoloca.
+        # Se COMPRUEBA una última vez antes de teclear, porque aquí se escribe
+        # dinero: poner el importe en el concepto equivocado no lo notaría nadie
+        # hasta que el pago estuviera hecho.
+        if not self._fila_cuadra(fila, self._palabras_de(
+                concepto.concepto_nombre)):
+            s.diagnostico("concepto_cambio_de_renglon")
+            raise ErrorRpa(
+                f"El renglón de «{concepto.concepto_nombre}» dejó de ser ese al "
+                f"desplazar el grid. No se captura el importe para no ponerlo "
+                f"en el concepto equivocado.")
+        campo = fila.locator(selectores.css("con.importe")).first
+        # Se TECLEA: la directiva de moneda de SIPP necesita pulsaciones reales;
+        # con fill() el modelo no confirma el importe.
+        # El tope es corto a propósito: si el campo no admite el clic, es que el
+        # renglón no está donde creemos, y esperar el minuto entero solo retrasa
+        # el diagnóstico —así moría la solicitud antes—.
+        try:
+            campo.click(timeout=10000)
+        except Cancelado:
+            raise
+        except Exception as exc:  # noqa: BLE001 — se explica y se corta
+            s.diagnostico("concepto_no_editable")
+            raise ErrorRpa(
+                f"Se encontró «{concepto.concepto_nombre}» en el grid pero su "
+                f"campo de importe no admitió la captura: {exc}") from exc
+        try:
+            campo.press("Control+a")
+        except Exception:  # noqa: BLE001
+            pass
+        campo.type(f"{concepto.importe:.2f}", delay=30)
+        campo.press("Tab")                  # el blur confirma el importe
+        s.page.wait_for_timeout(400)
+        return campo
 
     @staticmethod
     def _palabras_de(texto: str) -> list[str]:

@@ -1251,3 +1251,377 @@ def probar_lo_que_ya_esta_a_la_vista_no_se_mueve():
         flujo, grid = _flujo_grid(_MUCHOS, virtualiza=False)
         fila = flujo._fila_concepto("CONCEPTO 01")
         assert fila is not None and grid.scroll == 0
+
+
+# --------------------------------------------------------------------------- #
+#  El pago tiene que salir a nombre de quien es
+# --------------------------------------------------------------------------- #
+# Reportado en producción: aparecieron acreedores ya existentes con cuentas
+# bancarias de otras personas, y solicitudes a nombre del acreedor equivocado
+# con la cuenta correcta. Dar de alta un beneficiario arrastra el registro de su
+# cuenta, y si el formulario tiene otro seleccionado, la cuenta se le cuelga a
+# ÉL. Estas pruebas fijan los candados que lo impiden.
+class _SesionBeneficiario:
+    """Doble de sesión centrado en el panel de beneficiario."""
+
+    def __init__(self, folio="", nombre="", no_registrado=True):
+        self.folio = folio
+        self.nombre = nombre
+        self.no_registrado = no_registrado
+        self.avisos = []
+        self.diagnosticos = []
+        self.clics = []
+        self.page = type("P", (), {"wait_for_timeout": lambda _s, _ms: None})()
+
+    def loc(self, clave, dentro=None):
+        ses = self
+
+        class _Campo:
+            def input_value(_s):
+                return ses.folio if clave == "ben.folio" else ses.nombre
+
+            def is_checked(_s):
+                return ses.no_registrado
+
+            def click(_s, **_kw):
+                ses.clics.append(clave)
+
+        campo = _Campo()
+
+        class _Lista:
+            # Los tres paneles de beneficiario repiten el mismo campo, así que
+            # el motor los recorre en vez de mirar solo el primero.
+            def count(_s):
+                return 1
+
+            def nth(_s, _i):
+                return campo
+
+            @property
+            def first(_s):
+                return campo
+
+        return _Lista()
+
+    def llenar(self, *_a, **_kw):
+        raise AssertionError("no se debe escribir nada tras el candado")
+
+    def existe(self, *_a, **_kw):
+        return False
+
+    def anotar(self, _paso, mensaje, _nivel=None):
+        self.avisos.append(mensaje)
+
+    def diagnostico(self, nombre):
+        self.diagnosticos.append(nombre)
+
+    def cerrar_alertas(self, vueltas=6):
+        pass
+
+
+def _flujo_ben(sesion):
+    return rpa_sipp.FlujoSolicitudPago(sesion)
+
+
+def probar_no_se_da_de_alta_encima_de_un_beneficiario_existente():
+    """la cuenta acabaría registrada en el acreedor equivocado"""
+    ses = _SesionBeneficiario(folio="165", nombre="Observatorio Express")
+    s = comun.solicitud(comun.lote().id, "PARIS GARCIA AGIS")
+    try:
+        _flujo_ben(ses)._alta_beneficiario(s, None, {})
+        assert False, "debió detenerse"
+    except rpa_sipp.RequiereRevision as exc:
+        assert "165" in str(exc), "hay que decir con cuál se topó"
+        assert "PARIS GARCIA AGIS" in str(exc)
+    assert not ses.clics, "y no haber tocado nada del formulario"
+
+
+def probar_la_cuenta_no_se_registra_si_hay_un_folio_puesto():
+    """es el paso que escribe: se vuelve a mirar justo antes"""
+    ses = _SesionBeneficiario(folio="166", nombre="OPERACIONES TEMATICAS MZT")
+    s = comun.solicitud(comun.lote().id, "FILIBERTO CAZAREZ NIEBLAS")
+    try:
+        _flujo_ben(ses)._alta_cuenta_bancaria(s, None, {})
+        assert False, "debió detenerse"
+    except rpa_sipp.RequiereRevision as exc:
+        assert "166" in str(exc)
+    assert not ses.clics
+
+
+def probar_sin_no_registrado_la_cuenta_no_seria_suya():
+    """el modo del panel decide de quién es la cuenta que se captura"""
+    ses = _SesionBeneficiario(no_registrado=False)
+    s = comun.solicitud(comun.lote().id, "ANA LOPEZ")
+    try:
+        _flujo_ben(ses)._alta_cuenta_bancaria(s, None, {})
+        assert False, "debió detenerse"
+    except rpa_sipp.RequiereRevision as exc:
+        assert "No Registrado" in str(exc)
+
+
+def probar_con_el_formulario_limpio_el_alta_sigue_su_curso():
+    """el camino normal no cambia"""
+    ses = _SesionBeneficiario(folio="", no_registrado=True)
+    s = comun.solicitud(comun.lote().id, "ANA LOPEZ")
+    flujo = _flujo_ben(ses)
+    # Solo se comprueba que pasa el candado; lo que sigue toca el portal.
+    try:
+        flujo._alta_cuenta_bancaria(s, None, {})
+    except rpa_sipp.RequiereRevision as exc:
+        assert False, f"no debía detenerse: {exc}"
+    except Exception:  # noqa: BLE001 — el doble no llega más allá del candado
+        pass
+    assert "ben.agregar_cuenta" in ses.clics or ses.clics == []
+
+
+def probar_una_solicitud_no_empieza_sobre_el_formulario_de_la_anterior():
+    """lo que se capture encima se le cuelga al beneficiario que quedó"""
+    ses = _SesionBeneficiario(folio="165", nombre="Observatorio Express")
+    flujo = _flujo_ben(ses)
+    flujo.volver_al_listado = lambda: None          # el doble no navega
+    flujo.asegurar_modo_agregar = lambda: None
+    s = comun.solicitud(comun.lote().id, "PARIS GARCIA AGIS")
+    try:
+        flujo._exigir_formulario_limpio(s)
+        assert False, "debió detenerse"
+    except rpa_sipp.RequiereRevision as exc:
+        assert "165" in str(exc)
+    assert any("se empieza de nuevo" in a for a in ses.avisos), (
+        "y haberlo intentado antes de rendirse")
+
+
+def probar_el_formulario_limpio_no_estorba():
+    """sin beneficiario puesto, no hay nada que reiniciar"""
+    ses = _SesionBeneficiario(folio="")
+    s = comun.solicitud(comun.lote().id, "ANA LOPEZ")
+    _flujo_ben(ses)._exigir_formulario_limpio(s)
+    assert not ses.avisos
+
+
+def probar_un_renglon_ajeno_no_cuenta_como_coincidencia():
+    """un solo resultado no significa que sea el correcto"""
+    # Es el caso de producción: se buscaba a una persona y el buscador tenía
+    # todavía el resultado anterior, una empresa. El doble clic la habría
+    # elegido y el pago habría salido a su nombre.
+    buscado = rpa_sipp._palabras_clave("PARIS GARCIA AGIS")
+    renglon = rpa_sipp._palabras_clave("165  Observatorio Express")
+    assert not buscado.issubset(renglon)
+
+
+def probar_el_renglon_correcto_si_cuenta():
+    """el listado añade folio y razón social; eso no lo hace otro"""
+    buscado = rpa_sipp._palabras_clave("OPERACIONES TEMATICAS MZT")
+    renglon = rpa_sipp._palabras_clave("166  OPERACIONES TEMATICAS MZT SA DE CV")
+    assert buscado.issubset(renglon)
+
+
+def probar_los_acentos_no_impiden_reconocer_al_beneficiario():
+    """el Excel los trae y el listado de SIPP no siempre"""
+    buscado = rpa_sipp._palabras_clave("MARÍA GARCÍA PÉREZ")
+    renglon = rpa_sipp._palabras_clave("12  MARIA GARCIA PEREZ")
+    assert buscado.issubset(renglon)
+
+
+# --------------------------------------------------------------------------- #
+#  Las dos versiones de la pestaña de conceptos
+# --------------------------------------------------------------------------- #
+# SIPP cambió esta pestaña y las dos formas conviven: stage estrenó la nueva el
+# 07/09/2026 y producción puede tardar. La diferencia no es cosmética — en la
+# nueva, clicar la última columna, que es lo que había que hacer en la vieja,
+# BORRA el renglón.
+class _Importe:
+    def __init__(self, fila):
+        self.fila = fila
+
+    @property
+    def first(self):
+        return self
+
+    def click(self, **_kw):
+        pass
+
+    def press(self, _tecla):
+        pass
+
+    def type(self, texto, **_kw):
+        self.fila.importe = texto
+
+    def input_value(self):
+        return self.fila.importe
+
+    def evaluate(self, _js):
+        return self.fila.marcada
+
+
+class _Quitar:
+    def __init__(self, fila):
+        self.fila = fila
+
+    @property
+    def first(self):
+        return self
+
+    def click(self, **_kw):
+        self.fila.marcada = True
+        self.fila.clics_columna += 1
+
+
+class _FilaConcepto:
+    def __init__(self, nombre):
+        self.texto = nombre
+        self.importe = ""
+        self.marcada = False
+        self.clics_columna = 0
+
+    def locator(self, css):
+        clave = css.lower()
+        if "nombre" in clave:
+            texto = self.texto
+
+            class _Nombre:
+                @property
+                def first(_s):
+                    return _s
+
+                def inner_text(_s):
+                    return texto
+
+            return _Nombre()
+        if "importe" in clave:
+            return _Importe(self)
+        return _Quitar(self)
+
+    def bounding_box(self):
+        return {"x": 0, "y": 0, "width": 800, "height": 30}
+
+
+class _SesionConceptos:
+    """Doble de la pestaña, en sus dos versiones."""
+
+    def __init__(self, catalogo, con_combo=True, ya_en_grid=False):
+        self.catalogo = list(catalogo)
+        self.con_combo = con_combo
+        self.filas = [_FilaConcepto(n) for n in catalogo] if ya_en_grid else []
+        self.elegidos = []
+        self.diagnosticos = []
+        self.page = self
+        self.cancelado = None
+
+    # --- lo que usa el motor ---
+    def existe(self, clave, dentro=None):
+        return clave == "con.combo" and self.con_combo
+
+    def abrir_pestana(self, _n):
+        pass
+
+    def seleccionar_chosen(self, _clave, texto, _desc, **_kw):
+        if texto not in self.catalogo:
+            raise RuntimeError(f"«{texto}» no está en la lista")
+        self.elegidos.append(texto)
+        self.filas.append(_FilaConcepto(texto))
+
+    def loc(self, clave, dentro=None):
+        ses = self
+
+        class _Filas:
+            def count(_s):
+                return len(ses.filas)
+
+            def nth(_s, i):
+                return ses.filas[i]
+
+            @property
+            def first(_s):
+                return type("T", (), {"input_value": lambda _x: "0"})()
+
+        return _Filas()
+
+    def locator(self, _css):
+        return type("V", (), {"count": lambda _s: 0,
+                              "first": type("F", (), {"count": lambda _x: 0})()})()
+
+    def esperar_a(self, condicion, tope_ms=0, intervalo_ms=0):
+        return bool(condicion())
+
+    def wait_for_timeout(self, _ms):
+        pass
+
+    def abortar_si_cancelan(self):
+        pass
+
+    def anotar(self, *_a, **_kw):
+        pass
+
+    def diagnostico(self, nombre):
+        self.diagnosticos.append(nombre)
+
+    def visible_(self, _clave):
+        return False
+
+
+def _partida(nombre, importe):
+    return db.Partida(clase=db.CONCEPTO, concepto_nombre=nombre,
+                      importe=importe, origen="MANUAL")
+
+
+def _flujo_conceptos(ses):
+    flujo = rpa_sipp.FlujoSolicitudPago(ses)
+    flujo._blindar_total = lambda _c: None      # toca el portal; se prueba aparte
+    return flujo
+
+
+_CATALOGO = ["ISR RETENCIONES POR SALARIOS", "VIGILANCIA", "PAGO IMSS"]
+
+
+def probar_cada_concepto_se_agrega_desde_el_desplegable():
+    """en la versión nueva el grid nace vacío: hay que añadirlos"""
+    ses = _SesionConceptos(_CATALOGO)
+    with _SinMapa():
+        _flujo_conceptos(ses)._llenar_conceptos([
+            _partida("ISR RETENCIONES POR SALARIOS", 232.0),
+            _partida("VIGILANCIA", 100.0)])
+    assert ses.elegidos == ["ISR RETENCIONES POR SALARIOS", "VIGILANCIA"]
+    assert [f.importe for f in ses.filas] == ["232.00", "100.00"]
+
+
+def probar_no_se_toca_la_columna_que_ahora_borra_el_renglon():
+    """en la versión nueva esa columna es «Quitar Concepto de Pago»"""
+    ses = _SesionConceptos(_CATALOGO)
+    with _SinMapa():
+        _flujo_conceptos(ses)._llenar_conceptos([_partida("VIGILANCIA", 50.0)])
+    assert all(f.clics_columna == 0 for f in ses.filas), (
+        "clicar ahí borraría el concepto recién agregado")
+
+
+def probar_un_concepto_que_no_ofrece_la_empresa_se_explica():
+    """no se puede capturar y hay que decir por qué"""
+    ses = _SesionConceptos(_CATALOGO)
+    try:
+        with _SinMapa():
+            _flujo_conceptos(ses)._llenar_conceptos(
+                [_partida("CONCEPTO INVENTADO", 10.0)])
+        assert False, "debió detenerse"
+    except rpa_sipp.RequiereRevision as exc:
+        assert "CONCEPTO INVENTADO" in str(exc)
+
+
+def probar_la_version_anterior_sigue_funcionando():
+    """producción puede tardar en cambiar, y ahí hay que marcar la casilla"""
+    ses = _SesionConceptos(_CATALOGO, con_combo=False, ya_en_grid=True)
+    with _SinMapa():
+        _flujo_conceptos(ses)._llenar_conceptos([_partida("VIGILANCIA", 75.0)])
+    assert not ses.elegidos, "sin combo no hay nada que elegir"
+    fila = next(f for f in ses.filas if f.texto == "VIGILANCIA")
+    assert fila.importe == "75.00"
+    assert fila.clics_columna == 1, "aquí SÍ hay que marcar el renglón"
+
+
+def probar_sin_conceptos_y_sin_combo_no_se_captura_en_cero():
+    """una solicitud en $0 se ve capturada y hay que cancelarla a mano"""
+    ses = _SesionConceptos([], con_combo=False)
+    try:
+        with _SinMapa():
+            _flujo_conceptos(ses)._llenar_conceptos([_partida("VIGILANCIA", 1.0)])
+        assert False, "debió detenerse"
+    except rpa_sipp.RequiereRevision as exc:
+        assert "$0" in str(exc) or "vacío" in str(exc)
