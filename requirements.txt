@@ -1,7 +1,7 @@
 # Herramienta Automatizadora de Solicitudes de Pago — dependencias
 # (sqlite3 viene incluido con Python; no se lista)
 flet>=0.85           # interfaz de escritorio (Material)
-playwright>=1.60     # automatización del navegador (RPA del SIPP)
+playwright==1.64.1   # automatización del navegador (RPA del SIPP)
 openpyxl>=3.1        # lectura de plantillas de Excel y exportación de resultados
 PyMuPDF>=1.24        # capa de texto y rasterizado de PDF (lectura de carátulas)
 pytesseract>=0.3.10  # OCR local (requiere el motor Tesseract instalado)
