@@ -901,10 +901,16 @@ def probar_un_rfc_libre_no_estorba_el_alta():
 class _EntornoNavegador:
     """Aísla las variables de entorno y las carpetas que mira el motor."""
 
-    def __init__(self, *, en_sistema=False, en_datos=False, valor_previo=None):
+    # La revisión que «pide» el Playwright de la prueba. Se fija aquí para que
+    # el resultado no dependa de qué versión de Playwright esté instalada.
+    REVISION = "1248"
+
+    def __init__(self, *, en_sistema=False, en_datos=False, valor_previo=None,
+                 revision_en_sistema=REVISION):
         self.en_sistema = en_sistema
         self.en_datos = en_datos
         self.valor_previo = valor_previo
+        self.revision_en_sistema = revision_en_sistema
         self.instalaciones = 0
 
     def __enter__(self):
@@ -912,15 +918,18 @@ class _EntornoNavegador:
         self._guardado = dict(os.environ)
         self._instalar = rpa_sipp._instalar_chromium
         self._carpeta = rpa_sipp.CARPETA_NAVEGADOR
+        self._revision = rpa_sipp._revision_chromium
         rpa_sipp._instalar_chromium = self._contar
+        rpa_sipp._revision_chromium = lambda: self.REVISION
 
         self.raiz = tempfile.mkdtemp()
         self.sistema = os.path.join(self.raiz, "local", "ms-playwright")
         self.datos = os.path.join(self.raiz, "datos", "ms-playwright")
         if self.en_sistema:
-            os.makedirs(os.path.join(self.sistema, "chromium-1234"))
+            os.makedirs(os.path.join(
+                self.sistema, f"chromium-{self.revision_en_sistema}"))
         if self.en_datos:
-            os.makedirs(os.path.join(self.datos, "chromium-1234"))
+            os.makedirs(os.path.join(self.datos, f"chromium-{self.REVISION}"))
 
         os.environ["LOCALAPPDATA"] = os.path.join(self.raiz, "local")
         os.environ.pop("PLAYWRIGHT_BROWSERS_PATH", None)
@@ -940,6 +949,7 @@ class _EntornoNavegador:
         os.environ.clear()
         os.environ.update(self._guardado)
         rpa_sipp._instalar_chromium = self._instalar
+        rpa_sipp._revision_chromium = self._revision
         rpa_sipp.CARPETA_NAVEGADOR = self._carpeta
         return False
 
@@ -984,6 +994,17 @@ def probar_lo_ya_descargado_por_la_app_no_se_vuelve_a_bajar():
         rpa_sipp.asegurar_navegador()
         assert ent.elegida == ent.datos
         assert ent.instalaciones == 0
+
+
+def probar_un_chromium_de_otra_version_no_sirve():
+    """es el fallo de producción: tenía la 1234 y Playwright pedía la 1248"""
+    # Al actualizar la app cambia la versión de Playwright y, con ella, la
+    # revisión de Chromium que exige. Dar por buena la vieja dejaba el lote
+    # muriendo con «Executable doesn't exist at …chromium-1248…».
+    with _EntornoNavegador(en_sistema=True, revision_en_sistema="1234") as ent:
+        rpa_sipp.asegurar_navegador()
+        assert ent.elegida == ent.datos
+        assert ent.instalaciones == 1, "hay que bajar la revisión que pide"
 
 
 def probar_una_carpeta_vacia_no_pasa_por_instalada():
