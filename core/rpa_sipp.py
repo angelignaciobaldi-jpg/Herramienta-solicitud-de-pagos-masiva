@@ -18,6 +18,7 @@ interfaz lo llama desde `asyncio.to_thread(...)` para no congelarse.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -179,12 +180,42 @@ def preparar_archivo(ruta: str) -> str:
 # --------------------------------------------------------------------------- #
 #  Navegador
 # --------------------------------------------------------------------------- #
-def _hay_navegadores(carpeta: str) -> bool:
-    """True si esa carpeta es un almacén de navegadores de Playwright."""
+def _revision_chromium() -> str:
+    """Revisión de Chromium que exige el Playwright instalado («1248»).
+
+    Sale del `browsers.json` que viaja junto al driver. Vacío si no se pudo
+    leer, y entonces se acepta cualquier Chromium como antes.
+    """
     try:
-        return any(n.startswith("chromium") for n in os.listdir(carpeta))
+        from playwright._impl._driver import compute_driver_executable
+        _node, cli = compute_driver_executable()
+        with open(os.path.join(os.path.dirname(cli), "browsers.json"),
+                  encoding="utf-8") as f:
+            for nav in json.load(f).get("browsers", []):
+                if nav.get("name") == "chromium":
+                    return str(nav.get("revision") or "")
+    except Exception:  # noqa: BLE001 — sin el dato, se cae al criterio laxo
+        pass
+    return ""
+
+
+def _hay_navegadores(carpeta: str) -> bool:
+    """True si esa carpeta tiene el Chromium que pide ESTE Playwright.
+
+    No basta con «algún chromium»: cada versión de Playwright exige una
+    revisión exacta. Con el criterio laxo, un equipo que ya tenía la
+    chromium-1234 de una versión anterior pasaba la revisión, no se
+    descargaba nada y el lote moría con «Executable doesn't exist at
+    …chromium-1248…» (visto en producción el 04/11/2026 al actualizar).
+    """
+    try:
+        nombres = os.listdir(carpeta)
     except OSError:                 # no existe, o no se puede leer
         return False
+    revision = _revision_chromium()
+    if revision:
+        return f"chromium-{revision}" in nombres
+    return any(n.startswith("chromium") for n in nombres)
 
 
 def _instalar_chromium() -> None:
