@@ -23,12 +23,12 @@ from scripts.pruebas import comun
 def probar_las_pantallas_se_construyen():
     """cada pantalla se arma y expone su contenido sin abrir ventana"""
     from ui.bitacora import SeccionBitacora
-    from ui.conceptos import SeccionConceptos
+    from ui.catalogos import VistaConceptos
     from ui.documentos import SeccionDocumentos
     from ui.solicitudes import SeccionSolicitudes
 
     app = comun.AppFalsa()
-    for clase in (SeccionDocumentos, SeccionSolicitudes, SeccionConceptos,
+    for clase in (SeccionDocumentos, SeccionSolicitudes, VistaConceptos,
                   SeccionBitacora):
         pantalla = clase(app)
         assert pantalla.contenido is not None, clase.__name__
@@ -42,11 +42,62 @@ def probar_configuracion_dice_contra_que_sipp_se_trabaja():
     from ui.configuracion import SeccionConfiguracion
 
     app = comun.AppFalsa()
-    modal = SeccionConfiguracion(app)
-    assert modal.dialogo is not None
-    assert modal.txt_url.value == AMBIENTES["PRODUCCION"]
-    assert modal.txt_aviso_prod.visible, "el aviso del folio real siempre a la vista"
-    assert not hasattr(modal, "dd_ambiente"), "no debe poder elegirse"
+    with _sin_variable_de_ambiente()():
+        modal = SeccionConfiguracion(app)
+        assert modal.dialogo is not None
+        assert modal.txt_url.value == AMBIENTES["PRODUCCION"]
+        assert modal.txt_aviso_prod.visible, (
+            "el aviso del folio real siempre a la vista")
+        assert not hasattr(modal, "dd_ambiente"), "no debe poder elegirse"
+
+
+def _sin_variable_de_ambiente():
+    """Contexto que borra SIPP_AMBIENTE: las pruebas no dependen del equipo."""
+    import contextlib
+    import os
+
+    @contextlib.contextmanager
+    def _ctx(valor=None):
+        from core import entorno
+        previo = os.environ.get("SIPP_AMBIENTE")
+        if valor is None:
+            os.environ.pop("SIPP_AMBIENTE", None)
+        else:
+            os.environ["SIPP_AMBIENTE"] = valor
+        entorno._cargado = True          # que no relea el .env del equipo
+        try:
+            yield
+        finally:
+            os.environ.pop("SIPP_AMBIENTE", None)
+            if previo is not None:
+                os.environ["SIPP_AMBIENTE"] = previo
+
+    return _ctx
+
+
+def probar_para_ensayar_se_puede_apuntar_a_pruebas():
+    """hay que poder probar el robot sin consumir folios reales"""
+    from ui.configuracion import ambiente_actual, url_login
+
+    with _sin_variable_de_ambiente()("PRUEBAS"):
+        assert ambiente_actual() == "PRUEBAS"
+        assert "stage" in url_login()
+
+
+def probar_sin_pedirlo_se_trabaja_contra_produccion():
+    """el valor por defecto no cambia: es lo que llega a los equipos"""
+    from ui.configuracion import ambiente_actual
+
+    with _sin_variable_de_ambiente()():
+        assert ambiente_actual() == "PRODUCCION"
+
+
+def probar_un_ambiente_inventado_no_desvia_el_lote():
+    """un dedazo en la variable no puede dejar la herramienta en el limbo"""
+    from ui.configuracion import ambiente_actual
+
+    with _sin_variable_de_ambiente()("PRUEVAS"):
+        assert ambiente_actual() == "PRODUCCION"
 
 
 def probar_el_ambiente_no_se_puede_dejar_apuntando_a_pruebas():
@@ -59,7 +110,8 @@ def probar_el_ambiente_no_se_puede_dejar_apuntando_a_pruebas():
 
     preferencias.guardar_valor("ambiente", "PRUEBAS")
     try:
-        assert ambiente_actual() == "PRODUCCION"
+        with _sin_variable_de_ambiente()():
+            assert ambiente_actual() == "PRODUCCION"
     finally:
         preferencias.guardar_valor("ambiente", "PRODUCCION")
 
@@ -340,9 +392,7 @@ def probar_captura_ofrece_el_catalogo_de_conceptos():
     captura = CapturaSolicitud(app, lambda *_a: None)
     captura.abrir(comun.lote().id)
     renglon = captura.ed_conceptos.renglones[0]
-    opciones = [o.key for o in renglon.tf_nombre.options]
-    assert "VIGILANCIA" in opciones
-    assert renglon.tf_nombre.editable, "debe dejar escribir uno que no esté"
+    assert "VIGILANCIA" in renglon.tf_nombre.opciones
 
 
 def probar_captura_muestra_los_adjuntos_al_editar():
@@ -961,12 +1011,12 @@ def probar_quitar_filtros_devuelve_la_bitacora_completa():
 
 def probar_buscar_en_el_catalogo_de_conceptos():
     """el buscador filtra sin acentos, por palabras sueltas y en cualquier orden"""
-    from ui.conceptos import SeccionConceptos
+    from ui.catalogos import VistaConceptos
 
     conceptos.importar(["ISR RETENCIONES POR SALARIOS", "PREVISION OBRERA",
                         "PREVISION PATRONAL", "VIGILANCIA"], "Abastecedora")
     app = comun.AppFalsa()
-    pantalla = SeccionConceptos(app)
+    pantalla = VistaConceptos(app)
     pantalla.cargar_desde_db()
     assert "4 concepto(s)" in pantalla.txt_estado.value
     assert not pantalla.btn_limpiar.visible
@@ -974,7 +1024,7 @@ def probar_buscar_en_el_catalogo_de_conceptos():
     def buscar(texto):
         pantalla.tf_buscar.value = texto
         pantalla._cambiar_filtro()
-        return [c.nombre for c in pantalla._conceptos
+        return [c.nombre for c in pantalla._items
                 if pantalla._coincide(c)]
 
     assert buscar("prevision") == ["PREVISION OBRERA", "PREVISION PATRONAL"]
@@ -993,10 +1043,10 @@ def probar_buscar_sin_resultados_no_invita_a_importar():
     """el vacío por filtro se distingue del catálogo vacío"""
     # Con un solo mensaje, no encontrar «vigilancia» invitaría a importar de
     # SIPP un catálogo que ya está completo, o a darla de alta a mano duplicada.
-    from ui.conceptos import SeccionConceptos
+    from ui.catalogos import VistaConceptos
 
     app = comun.AppFalsa()
-    pantalla = SeccionConceptos(app)
+    pantalla = VistaConceptos(app)
     pantalla.cargar_desde_db()
     assert pantalla.vacio.visible and not pantalla.sin_resultados.visible
 
@@ -1015,11 +1065,11 @@ def probar_buscar_sin_resultados_no_invita_a_importar():
 
 def probar_el_alta_deja_ver_el_concepto_nuevo():
     """agregar con una búsqueda puesta no esconde lo recién agregado"""
-    from ui.conceptos import SeccionConceptos
+    from ui.catalogos import VistaConceptos
 
     conceptos.importar(["VIGILANCIA"], "Abastecedora")
     app = comun.AppFalsa()
-    pantalla = SeccionConceptos(app)
+    pantalla = VistaConceptos(app)
     pantalla.cargar_desde_db()
     pantalla.tf_buscar.value = "vigilancia"
     pantalla._cambiar_filtro()
@@ -1033,10 +1083,10 @@ def probar_el_alta_deja_ver_el_concepto_nuevo():
 
 def probar_alta_manual_de_concepto_avisa_de_soporte():
     """al crear un concepto a mano se advierte que puede no existir en SIPP"""
-    from ui.conceptos import SeccionConceptos
+    from ui.catalogos import VistaConceptos
 
     app = comun.AppFalsa()
-    pantalla = SeccionConceptos(app)
+    pantalla = VistaConceptos(app)
     pantalla.cargar_desde_db()
     pantalla._abrir_alta()
     pantalla.tf_nombre.value = "CONCEPTO NUEVO"
@@ -1178,9 +1228,8 @@ def probar_el_concepto_importado_no_se_borra_al_abrir_y_guardar():
     renglon = modal.ed_conceptos.renglones[0]
     assert renglon.tf_nombre.value, "el campo no puede quedar vacío"
     assert "APOYO DE UTILES" in renglon.tf_nombre.value.upper()
-    # Y la opción tiene que existir, o el desplegable no la puede mostrar.
-    assert any(o.key == renglon.tf_nombre.value
-               for o in renglon.tf_nombre.options)
+    # Y tiene que estar entre las opciones, o el buscador no lo encontraría.
+    assert renglon.tf_nombre.value in renglon.tf_nombre.opciones
 
 
 def probar_un_concepto_fuera_del_catalogo_tampoco_se_pierde():
@@ -1198,3 +1247,297 @@ def probar_un_concepto_fuera_del_catalogo_tampoco_se_pierde():
     modal.abrir(lote.id, s, db.listar_partidas(s.id))
     renglon = modal.ed_conceptos.renglones[0]
     assert renglon.tf_nombre.value == "CONCEPTO QUE NADIE IMPORTO"
+
+
+# --------------------------------------------------------------------------- #
+#  Pantalla del catálogo de insumos
+# --------------------------------------------------------------------------- #
+def probar_la_pantalla_de_insumos_lista_el_catalogo():
+    """es la lista que la plantilla ofrece a los Proveedores"""
+    from core import insumos
+    from ui.catalogos import VistaInsumos
+
+    insumos.importar(["LIMPIEZA DE OFICINAS", "FLETES"], reemplazar=True)
+    pantalla = VistaInsumos(comun.AppFalsa())
+    pantalla.cargar_desde_db()
+    assert pantalla.contenido is not None
+    assert "2 insumo(s)" in pantalla.txt_estado.value
+    assert pantalla.tabla.control.visible
+    assert not pantalla.vacio.visible
+
+
+def probar_el_catalogo_vacio_explica_de_donde_sale():
+    """no se importa del portal: lo entrega el área, y hay que decirlo"""
+    from core import insumos
+    from ui.catalogos import VistaInsumos
+
+    insumos.vaciar()
+    pantalla = VistaInsumos(comun.AppFalsa())
+    pantalla.cargar_desde_db()
+    assert pantalla.vacio.visible
+    assert not pantalla.tabla.control.visible
+
+
+def probar_buscar_un_insumo_no_depende_de_acentos_ni_del_orden():
+    """los nombres son largos y nadie recuerda el orden exacto"""
+    from core import insumos
+    from ui.catalogos import VistaInsumos
+
+    insumos.importar(["MANTENIMIENTO DE AIRE ACONDICIONADO", "FLETES"],
+                     reemplazar=True)
+    pantalla = VistaInsumos(comun.AppFalsa())
+    pantalla.tf_buscar.value = "acondicionado mantenimiénto"
+    pantalla._cambiar_filtro()
+    assert "1 de 2" in pantalla.txt_estado.value
+
+
+def probar_el_vacio_por_busqueda_no_se_confunde_con_el_catalogo_vacio():
+    """si no, no encontrar algo invitaría a recargar un catálogo completo"""
+    from core import insumos
+    from ui.catalogos import VistaInsumos
+
+    insumos.importar(["FLETES"], reemplazar=True)
+    pantalla = VistaInsumos(comun.AppFalsa())
+    pantalla.tf_buscar.value = "no existe esto"
+    pantalla._cambiar_filtro()
+    assert pantalla.sin_resultados.visible
+    assert not pantalla.vacio.visible
+
+
+def probar_no_se_da_de_alta_un_insumo_que_ya_esta():
+    """aunque esté escrito de otra forma: es el mismo"""
+    from core import insumos
+    from ui.catalogos import VistaInsumos
+
+    insumos.importar(["MANTENIMIENTO DE AIRE ACONDICIONADO"], reemplazar=True)
+    pantalla = VistaInsumos(comun.AppFalsa())
+    pantalla._abrir_alta()
+    pantalla.tf_nombre.value = "mantenimiento de aíre acondicionado"
+    pantalla._guardar_alta()
+    assert pantalla.txt_error_alta.visible
+    assert len(insumos.nombres()) == 1, "no debe duplicarse"
+
+
+# --------------------------------------------------------------------------- #
+#  Paginación de los catálogos
+# --------------------------------------------------------------------------- #
+# El catálogo de insumos del área pasa de dos mil entradas: pintarlas todas manda
+# al cliente miles de controles por cada tecla del buscador.
+def _vista_insumos_con(n):
+    from core import insumos
+    from ui.catalogos import VistaInsumos
+
+    insumos.importar([f"SERVICIO {i:04d}" for i in range(n)], reemplazar=True)
+    vista = VistaInsumos(comun.AppFalsa())
+    vista.cargar_desde_db()
+    return vista
+
+
+def probar_el_catalogo_se_pagina():
+    """dos mil renglones de golpe hacen inusable la pantalla"""
+    from ui.catalogos import TAMANO_DEFECTO
+
+    vista = _vista_insumos_con(120)
+    assert len(vista.tabla._filas) == TAMANO_DEFECTO
+    assert "120" in vista.txt_estado.value, "el total sigue a la vista"
+
+
+def probar_se_puede_elegir_cuantos_registros_ver():
+    """10 para ojear, 1000 para revisar el catálogo entero de un tirón"""
+    from ui.catalogos import TAMANOS_PAGINA
+
+    assert TAMANOS_PAGINA == [10, 50, 100, 1000]
+    vista = _vista_insumos_con(120)
+    for tamano in TAMANOS_PAGINA:
+        vista.dd_tamano.value = str(tamano)
+        vista._cambiar_tamano()
+        assert len(vista.tabla._filas) == min(tamano, 120), tamano
+
+
+def probar_cambiar_de_pagina_muestra_los_siguientes():
+    """y no repite los mismos"""
+    vista = _vista_insumos_con(120)
+    # celdas[1] es el nombre: la primera columna de los insumos es el folio.
+    primeros = [f.celdas[1] for f in vista.tabla._filas]
+    vista._mover_pagina(1)
+    segundos = [f.celdas[1] for f in vista.tabla._filas]
+    assert primeros != segundos
+    assert not set(primeros) & set(segundos), "no puede repetir renglones"
+
+
+def probar_no_se_puede_pasar_de_la_ultima_pagina():
+    """el botón se apaga en los extremos, en vez de dejar la tabla vacía"""
+    vista = _vista_insumos_con(120)
+    assert vista.btn_pag_anterior.disabled, "en la primera no hay anterior"
+    for _ in range(10):
+        vista._mover_pagina(1)
+    assert vista.btn_pag_siguiente.disabled
+    assert vista.tabla._filas, "la última página nunca queda vacía"
+
+
+def probar_al_cambiar_el_tamano_se_vuelve_a_la_primera_pagina():
+    """la página 7 de 50 no existe si ahora se ven 1000 por página"""
+    vista = _vista_insumos_con(120)
+    vista._mover_pagina(1)
+    vista.dd_tamano.value = "1000"
+    vista._cambiar_tamano()
+    assert vista._pagina == 0
+
+
+def probar_buscar_no_deja_la_tabla_en_una_pagina_que_ya_no_existe():
+    """filtrar y quedarse en la página 3 muestra un vacío que confunde"""
+    vista = _vista_insumos_con(120)
+    vista._mover_pagina(1)
+    vista.tf_buscar.value = "SERVICIO 0001"
+    vista._cambiar_filtro()
+    assert vista._pagina == 0
+    assert len(vista.tabla._filas) == 1
+
+
+def probar_con_pocos_registros_no_estorba_la_navegacion():
+    """sin varias páginas, las flechas no pintan nada"""
+    vista = _vista_insumos_con(5)
+    assert not vista.btn_pag_siguiente.visible
+    assert vista.dd_tamano.visible, "pero el selector se queda: es una elección"
+
+
+def probar_los_dos_catalogos_estan_en_la_misma_pantalla():
+    """son lo mismo para el usuario: la lista del desglose"""
+    from core import conceptos, insumos
+    from ui.catalogos import SeccionCatalogos
+
+    conceptos.guardar("PAGO IMSS")
+    insumos.importar(["LIMPIEZA"], reemplazar=True)
+    seccion = SeccionCatalogos(comun.AppFalsa())
+    seccion.cargar_desde_db()
+    assert seccion.conceptos.contenido.visible, "arranca en conceptos"
+    assert not seccion.insumos.contenido.visible
+    seccion._cambiar("insumos")
+    assert seccion.insumos.contenido.visible
+    assert not seccion.conceptos.contenido.visible
+
+
+# --------------------------------------------------------------------------- #
+#  El renglón de insumo en el detalle de la solicitud
+# --------------------------------------------------------------------------- #
+def _renglon_insumo(partida=None):
+    from core.db import INSUMO, Partida
+    from ui.captura_solicitud import _RenglonPartida
+
+    return _RenglonPartida(comun.AppFalsa().page, INSUMO,
+                           partida or Partida(clase=INSUMO),
+                           lambda: None, lambda _r: None)
+
+
+def probar_el_insumo_se_elige_del_catalogo():
+    """escribir a mano lo que no existe en SIPP falla a media corrida"""
+    from core import insumos
+
+    insumos.importar(["LIMPIEZA DE OFICINAS", "FLETES FORANEOS"],
+                     reemplazar=True)
+    renglon = _renglon_insumo()
+    assert "LIMPIEZA DE OFICINAS" in renglon.tf_nombre.opciones
+    assert "FLETES FORANEOS" in renglon.tf_nombre.opciones
+
+
+def probar_el_insumo_que_ya_traia_la_partida_no_se_pierde():
+    """un desplegable sin esa opción se pinta vacío, y guardar la borraría"""
+    from core import insumos
+    from core.db import INSUMO, Partida
+
+    insumos.importar(["LIMPIEZA DE OFICINAS"], reemplazar=True)
+    partida = Partida(clase=INSUMO, insumo_nombre="SERVICIO NO CARGADO",
+                      importe=100.0)
+    renglon = _renglon_insumo(partida)
+    assert renglon.tf_nombre.value == "SERVICIO NO CARGADO"
+    assert renglon.recolectar().insumo_nombre == "SERVICIO NO CARGADO"
+
+
+def probar_el_insumo_se_enseña_como_lo_tiene_el_catalogo():
+    """verlo escrito de otra forma invita a «corregirlo» a mano"""
+    from core import insumos
+    from core.db import INSUMO, Partida
+
+    insumos.importar(["MANTENIMIENTO DE AIRE ACONDICIONADO"], reemplazar=True)
+    partida = Partida(clase=INSUMO,
+                      insumo_nombre="mantenimiento de aíre acondicionado")
+    assert _renglon_insumo(partida).tf_nombre.value == \
+        "MANTENIMIENTO DE AIRE ACONDICIONADO"
+
+
+def probar_el_detalle_ya_no_pide_centro_de_costos_ni_cuenta():
+    """se llenan por Excel y por asignación masiva, iguales para todo el lote"""
+    renglon = _renglon_insumo()
+    assert not hasattr(renglon, "tf_centro")
+    assert not hasattr(renglon, "tf_cuenta")
+
+
+def probar_guardar_el_detalle_no_borra_el_centro_de_costos():
+    """el dato sigue existiendo: no editarlo no puede significar vaciarlo"""
+    from core.db import INSUMO, Partida
+
+    partida = Partida(clase=INSUMO, insumo_nombre="LIMPIEZA",
+                      centro_costos="CC-01", cuenta_contable="5000",
+                      importe=100.0)
+    guardada = _renglon_insumo(partida).recolectar()
+    assert guardada.centro_costos == "CC-01"
+    assert guardada.cuenta_contable == "5000"
+
+
+def probar_elegir_en_el_buscador_deja_el_insumo_en_el_renglon():
+    """el modal es solo la forma de elegir: lo que cuenta es lo que queda"""
+    from core import insumos
+
+    insumos.importar(["FLETES FORANEOS", "LIMPIEZA"], reemplazar=True)
+    renglon = _renglon_insumo()
+    renglon.tf_nombre._elegido("FLETES FORANEOS")
+    assert renglon.tf_nombre.value == "FLETES FORANEOS"
+    assert renglon.recolectar().insumo_nombre == "FLETES FORANEOS"
+
+
+def probar_el_desglose_no_despliega_la_lista_sobre_la_pantalla():
+    """con dos mil insumos, un desplegable tapa la ventana entera"""
+    # Reportado el 10/09/2026: la lista del catálogo del área ocupaba toda la
+    # pantalla y había que recorrerla a ciegas.
+    import flet as ft
+
+    renglon = _renglon_insumo()
+    assert not isinstance(renglon.tf_nombre, ft.Dropdown)
+    assert renglon.tf_nombre.campo.read_only, "se elige buscando, no tecleando"
+
+
+def probar_el_renglon_guarda_el_folio_del_insumo():
+    """el robot busca por folio en SIPP: es exacto"""
+    from core import insumos
+
+    insumos.importar([("1024", "LIMPIEZA DE OFICINAS")], reemplazar=True)
+    renglon = _renglon_insumo()
+    renglon.tf_nombre._elegido("LIMPIEZA DE OFICINAS")
+    assert renglon.recolectar().insumo_id == "1024"
+
+
+def probar_cambiar_de_insumo_no_deja_el_folio_del_anterior():
+    """apuntaría a otro servicio, y el pago saldría por lo que no es"""
+    from core import insumos
+    from core.db import INSUMO, Partida
+
+    insumos.importar([("1024", "LIMPIEZA"), ("2048", "FLETES")],
+                     reemplazar=True)
+    partida = Partida(clase=INSUMO, insumo_nombre="LIMPIEZA", insumo_id="1024")
+    renglon = _renglon_insumo(partida)
+    renglon.tf_nombre._elegido("FLETES")
+    assert renglon.recolectar().insumo_id == "2048"
+
+
+def probar_el_catalogo_de_insumos_se_busca_por_folio():
+    """teclearlo es mucho más rápido que un nombre de ochenta caracteres"""
+    from core import insumos
+    from ui.catalogos import VistaInsumos
+
+    insumos.importar([("1024", "LIMPIEZA DE OFICINAS"),
+                      ("2048", "FLETES FORANEOS")], reemplazar=True)
+    vista = VistaInsumos(comun.AppFalsa())
+    vista.tf_buscar.value = "2048"
+    vista._cambiar_filtro()
+    assert len(vista.tabla._filas) == 1
+    assert "FLETES" in vista.tabla._filas[0].celdas[1]

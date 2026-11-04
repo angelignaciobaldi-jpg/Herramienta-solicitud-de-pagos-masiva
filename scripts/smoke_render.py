@@ -132,12 +132,12 @@ async def _principal(page: ft.Page) -> None:
         _ok("shell base")
 
         pantallas = []
-        from ui.conceptos import SeccionConceptos
+        from ui.catalogos import SeccionCatalogos
 
         for nombre, clase in (("Configuración", SeccionConfiguracion),
                               ("Documentos", SeccionDocumentos),
                               ("Solicitudes", SeccionSolicitudes),
-                              ("Conceptos", SeccionConceptos),
+                              ("Catálogos", SeccionCatalogos),
                               ("Bitácora", SeccionBitacora)):
             try:
                 pantallas.append((nombre, clase(app_obj)))

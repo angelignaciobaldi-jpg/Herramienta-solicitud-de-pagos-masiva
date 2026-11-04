@@ -150,15 +150,15 @@ class AppSolicitudesPago:
         # contiene en _arrancar_app (que lo muestra en pantalla) en vez de tumbar
         # todo el proceso.
         from ui.bitacora import SeccionBitacora
-        from ui.conceptos import SeccionConceptos
         from ui.configuracion import SeccionConfiguracion
         from ui.documentos import SeccionDocumentos
+        from ui.catalogos import SeccionCatalogos
         from ui.solicitudes import SeccionSolicitudes
 
         self.config = SeccionConfiguracion(self)
         self.documentos = SeccionDocumentos(self)
         self.solicitudes = SeccionSolicitudes(self)
-        self.conceptos = SeccionConceptos(self)
+        self.catalogos = SeccionCatalogos(self)
         self.bitacora = SeccionBitacora(self)
 
         # Área de contenido: todas las pantallas viven aquí; solo se muestra la
@@ -166,7 +166,7 @@ class AppSolicitudesPago:
         self._secciones = [
             self.solicitudes.contenido,
             self.documentos.contenido,
-            self.conceptos.contenido,
+            self.catalogos.contenido,
             self.bitacora.contenido,
         ]
         for i, seccion in enumerate(self._secciones):
@@ -223,13 +223,13 @@ class AppSolicitudesPago:
         # cierre del navegador se le cuelga a la página para que lo encuentre.
         self.page._cerrar_rpa = self.solicitudes.cerrar_rpa
         # `page.on_resize` es un slot ÚNICO; se despacha a una lista de listeners.
-        for pantalla in (self.solicitudes, self.documentos, self.conceptos,
+        for pantalla in (self.solicitudes, self.documentos, self.catalogos,
                          self.bitacora, self.config):
             self.registrar_on_resize(getattr(pantalla, "_on_resize", None))
         self.page.on_resize = self._despachar_resize
         self._pintar_barra_titulo(oscuro)
         # Carga inicial de lo que ya esté guardado.
-        for pantalla in (self.solicitudes, self.conceptos, self.bitacora):
+        for pantalla in (self.solicitudes, self.catalogos, self.bitacora):
             cargar = getattr(pantalla, "cargar_desde_db", None)
             if callable(cargar):
                 cargar()
@@ -241,7 +241,7 @@ class AppSolicitudesPago:
         definiciones = [
             ("Solicitudes", ft.Icons.RECEIPT_LONG),
             ("Documentos", ft.Icons.FOLDER_OPEN),
-            ("Conceptos", ft.Icons.LIST_ALT),
+            ("Catálogos", ft.Icons.LIST_ALT),
             ("Bitácora", ft.Icons.HISTORY),
         ]
         controles = []

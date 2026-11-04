@@ -473,11 +473,28 @@ class SesionSipp:
         except Exception:  # noqa: BLE001 — ya estaba a la vista
             pass
 
+        # Tener la opción en el <select> no basta: tras elegir el campo padre,
+        # SIPP deja el widget en `chosen-disabled` un rato mientras Angular lo
+        # rehace. Un clic ahí no abre nada, y el intento se quedaba esperando
+        # al buscador el tope global de 60 s (eso era la pausa de ~1 min en
+        # «Tipo de beneficiario» justo después de elegir Pago Extraordinario).
+        self.esperar_a(
+            lambda: "chosen-disabled" not in (
+                contenedor.get_attribute("class") or ""),
+            tope_ms=12000, intervalo_ms=150)
+
         ultimo = None
         for intento in range(1, intentos + 1):
             self.abortar_si_cancelan()
             try:
-                contenedor.click()
+                contenedor.click(timeout=8000)
+                # Si el widget no se abrió, se falla YA y se reintenta: el
+                # buscador oculto haría esperar el tope global entero.
+                if not self.esperar_a(
+                        lambda: "chosen-with-drop" in (
+                            contenedor.get_attribute("class") or ""),
+                        tope_ms=3000, intervalo_ms=100):
+                    raise ErrorRpa("el desplegable no se abrió")
                 buscador = contenedor.locator("input.chosen-search-input")
                 # Chosen se puebla cuando Angular termina de llenar el <select>
                 # y dispara `chosen:updated`. Puede haber opciones en el select
@@ -486,7 +503,7 @@ class SesionSipp:
                 self.esperar_a(
                     lambda: contenedor.locator("li.active-result").count() > 0,
                     tope_ms=4000, intervalo_ms=100)
-                buscador.click()
+                buscador.click(timeout=5000)
                 buscador.press("Control+a")
                 buscador.press("Delete")
                 buscador.type(texto, delay=20)
@@ -497,7 +514,7 @@ class SesionSipp:
                 self.esperar_a(lambda: opcion.count() > 0, tope_ms=6000,
                                intervalo_ms=100)
                 opcion.wait_for(state="visible", timeout=6000)
-                opcion.click()
+                opcion.click(timeout=5000)
                 return
             except Cancelado:
                 raise                      # parar manda sobre reintentar
@@ -1113,10 +1130,17 @@ class FlujoSolicitudPago:
 
         self.abortar_si_cancelan()
         # 4) Moneda y descripción. La FECHA no va aquí: ver el paso 6.
+        # SIPP deshabilita la moneda en cuanto hay cuenta registrada (la toma de
+        # ella). `select_option` sobre un campo deshabilitado no falla: espera
+        # a que se habilite el tope global de 60 s, y esa era la pausa que se
+        # veía después de dar de alta al acreedor. Si está deshabilitado se
+        # salta; si no, se elige con un tope corto.
         if solicitud.moneda and s.visible_("sol.moneda"):
+            moneda = s.loc("sol.moneda").first
             try:
-                s.loc("sol.moneda").first.select_option(label=solicitud.moneda)
-            except Exception:  # noqa: BLE001 — se deshabilita si ya hay cuenta
+                if moneda.is_enabled(timeout=2000):
+                    moneda.select_option(label=solicitud.moneda, timeout=5000)
+            except Exception:  # noqa: BLE001 — la moneda la decide la cuenta
                 pass
         if solicitud.descripcion:
             deseada = texto_sipp(solicitud.descripcion)
@@ -1288,20 +1312,41 @@ class FlujoSolicitudPago:
         s = self.s
         if solicitud.forma_pago != catalogos.FORMA_PAGO_CON_CUENTA:
             return                      # sin transferencia no hay cuenta
+
+        def cuentas() -> list[str]:
+            try:
+                return [o.strip() for o in
+                        s.loc("ben.cuentas").first.locator(
+                            "option").all_inner_texts()
+                        if o.strip() and o.strip() != "Seleccionar"]
+            except Exception:  # noqa: BLE001
+                return []
+
+        # SIPP pide las cuentas del beneficiario DESPUÉS de seleccionarlo: se
+        # les da un momento para llegar antes de concluir que no tiene.
+        s.esperar_a(lambda: bool(cuentas()), tope_ms=8000, intervalo_ms=250)
+        opciones = cuentas()
+
         if solicitud.cuenta_clabe:
             # Las cuentas se listan como 'CLABE - NOMBRE': se empareja por CLABE.
+            # Si la del Excel no está entre las suyas, el robot NO la da de
+            # alta: colgarle una cuenta a un beneficiario existente es justo lo
+            # que dejó cuentas a nombre de otros (ver `_alta_beneficiario`).
+            # Se reporta para que alguien la cargue a mano en SIPP.
+            clabe = re.sub(r"\D", "", solicitud.cuenta_clabe)
+            if not any(clabe and clabe in re.sub(r"\D", "", o)
+                       for o in opciones):
+                tipo = (solicitud.tipo_beneficiario or "Beneficiario").capitalize()
+                raise RequiereRevision(
+                    f"«{solicitud.beneficiario_nombre}»: {tipo} ya cargado pero "
+                    f"con cuenta diferente, solicitar carga manual (la CLABE "
+                    f"{solicitud.cuenta_clabe} no está entre sus "
+                    f"{len(opciones)} cuenta(s) en SIPP).")
             s.seleccionar_chosen("ben.cuentas", solicitud.cuenta_clabe,
                                  "Cuenta bancaria")
             return
 
         # Sin CLABE en la solicitud, solo se puede elegir si no hay ambigüedad.
-        try:
-            opciones = [o.strip() for o in
-                        s.loc("ben.cuentas").first.locator(
-                            "option").all_inner_texts()
-                        if o.strip() and o.strip() != "Seleccionar"]
-        except Exception:  # noqa: BLE001
-            opciones = []
         if len(opciones) == 1:
             s.seleccionar_chosen("ben.cuentas", opciones[0], "Cuenta bancaria")
             s.anotar("cuenta", f"Única cuenta del beneficiario: {opciones[0]}")
@@ -1626,12 +1671,23 @@ class FlujoSolicitudPago:
             s.page.wait_for_timeout(1000)
             modal = s.loc("ins.modal").first
             if modal.count() > 0 and modal.is_visible():
-                if insumo.insumo_id:
+                # POR FOLIO siempre que se tenga: el modal de SIPP acepta
+                # folio o nombre, y el folio identifica un insumo y solo uno.
+                # Los nombres del catálogo son larguísimos y se parecen entre
+                # sí —«… MANGUERAS DE COMBUSTIBLE DE GASOLINA» y «… DIESEL»—,
+                # así que buscar por nombre puede devolver varios.
+                por_folio = bool(insumo.insumo_id)
+                if por_folio:
                     s.llenar("ins.modal_folio", insumo.insumo_id,
                              f"Folio insumo {i}")
                 elif insumo.insumo_nombre:
                     s.llenar("ins.modal_nombre", insumo.insumo_nombre,
                              f"Insumo {i}")
+                s.anotar("insumos",
+                         f"Buscando «{insumo.insumo_nombre}» por "
+                         + (f"folio {insumo.insumo_id}" if por_folio
+                            else "nombre (el catálogo no trae su folio)"),
+                         "INFO" if por_folio else "WARN")
                 s.loc("ins.modal_buscar").first.click()
                 s.page.wait_for_timeout(1500)
                 filas = modal.locator(selectores.css("grid.filas"))
@@ -1639,6 +1695,16 @@ class FlujoSolicitudPago:
                     raise RequiereRevision(
                         f"El insumo «{insumo.insumo_nombre or insumo.insumo_id}» "
                         f"no existe en el catálogo de SIPP.")
+                # Con varias coincidencias no se adivina: aquí se elige QUÉ se
+                # está pagando, y quedarse con la primera es cómo un pago acaba
+                # cargado al servicio equivocado.
+                if filas.count() > 1 and not por_folio:
+                    s.diagnostico(f"insumo_{i}_ambiguo")
+                    raise RequiereRevision(
+                        f"«{insumo.insumo_nombre}» devuelve "
+                        f"{filas.count()} resultados en el catálogo de SIPP y "
+                        f"la solicitud no trae su folio. Carga el catálogo de "
+                        f"insumos con folios o indica cuál es.")
                 filas.first.dblclick()
                 s.page.wait_for_timeout(1200)
             s.cerrar_alertas()
@@ -1649,6 +1715,7 @@ class FlujoSolicitudPago:
                 raise ErrorRpa(
                     f"El insumo «{insumo.insumo_nombre or insumo.insumo_id}» no "
                     f"se agregó al grid: quedó con {grid.count()} renglón(es).")
+            self._importe_insumo(insumo, i)
         s.anotar("insumos", f"{grid.count()} renglón(es) en el grid")
         # Aviso, no error: a diferencia de los conceptos, no está confirmado
         # cómo deriva SIPP el total desde este grid. Se deja constancia y que lo
@@ -1663,6 +1730,36 @@ class FlujoSolicitudPago:
                      "WARN" if self._es_cero(actual) else "INFO")
         except Exception:  # noqa: BLE001 — informativo
             pass
+
+    def _importe_insumo(self, insumo: Partida, i: int) -> None:
+        """Escribe el importe en el renglón recién agregado.
+
+        El grid trae su propia columna de Importe y SIPP recalcula el total al
+        salir del campo (`actualizarImporteInsumos`). Sin esto los insumos
+        entraban sin importe y la solicitud se guardaba en $0, que es peor que
+        un error: se ve capturada y hay que cancelarla a mano.
+        """
+        s = self.s
+        campos = s.page.locator(
+            f"{selectores.css('ins.grid')} {selectores.css('ins.importe')}")
+        if campos.count() == 0:
+            s.anotar("insumos",
+                     f"El renglón {i} no tiene campo de importe; lo tendrá que "
+                     f"capturar una persona", "WARN")
+            return
+        campo = campos.last
+        try:
+            campo.click(timeout=10000)
+            campo.press("Control+a")
+        except Cancelado:
+            raise
+        except Exception:  # noqa: BLE001 — se intenta escribir igual
+            pass
+        # Se TECLEA, como en los conceptos: la directiva de moneda de SIPP
+        # necesita pulsaciones reales.
+        campo.type(f"{insumo.importe:.2f}", delay=30)
+        campo.press("Tab")              # el blur dispara el recálculo
+        s.page.wait_for_timeout(400)
 
     def _llenar_conceptos(self, conceptos: list[Partida]) -> None:
         """Captura los conceptos de pago y sus importes.

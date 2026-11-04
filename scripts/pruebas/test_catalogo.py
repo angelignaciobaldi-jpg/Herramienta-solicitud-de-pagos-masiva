@@ -430,3 +430,227 @@ def probar_con_dos_candidatos_no_se_adivina():
     """elegir mal manda el dinero a otro concepto y no lo nota nadie"""
     _con_catalogo("PAGO DE PTU 2025", "PAGO DE PTU 2026")
     assert conceptos.canonico("PAGO PTU") == "PAGO PTU"
+
+
+# --------------------------------------------------------------------------- #
+#  Catálogo de insumos y servicios
+# --------------------------------------------------------------------------- #
+# SIPP no pide lo mismo a todos: a un Proveedor le pide Insumos & Servicios y a
+# un Deudor o un Acreedor, Conceptos de Pago. Son dos catálogos, y el de insumos
+# no se importa del portal —es enorme— sino que lo entrega el área ya depurado.
+def probar_el_catalogo_de_insumos_es_independiente_del_de_conceptos():
+    """el mismo texto puede estar en los dos sin ser lo mismo"""
+    from core import insumos
+
+    insumos.vaciar()
+    conceptos.guardar("VIGILANCIA")
+    insumos.guardar("VIGILANCIA")
+    assert conceptos.existe("VIGILANCIA")
+    assert insumos.existe("VIGILANCIA")
+
+
+def probar_un_insumo_se_reconoce_aunque_cambie_la_escritura():
+    """misma regla que en conceptos: acentos y puntuación no cambian lo que dice"""
+    from core import insumos
+
+    insumos.vaciar()
+    insumos.guardar("MANTENIMIENTO DE AIRE ACONDICIONADO")
+    assert insumos.canonico("mantenimiento de aíre acondicionado.") == \
+        "MANTENIMIENTO DE AIRE ACONDICIONADO"
+
+
+def probar_recargar_el_catalogo_retira_lo_que_el_area_quito():
+    """llega una versión depurada nueva: sustituye, no se acumula"""
+    from core import insumos
+
+    insumos.importar(["UNO", "DOS", "TRES"], reemplazar=True)
+    resumen = insumos.importar(["UNO", "CUATRO"], reemplazar=True)
+    assert resumen["retirados"] == 3
+    assert sorted(insumos.nombres()) == ["CUATRO", "UNO"]
+
+
+def probar_agregar_no_borra_lo_que_ya_habia():
+    """a veces solo se añaden servicios nuevos"""
+    from core import insumos
+
+    insumos.importar(["UNO"], reemplazar=True)
+    insumos.importar(["DOS"], reemplazar=False)
+    assert sorted(insumos.nombres()) == ["DOS", "UNO"]
+
+
+def _archivo_insumos(filas, ext=".xlsx"):
+    import tempfile
+
+    ruta = os.path.join(tempfile.mkdtemp(), "insumos" + ext)
+    if ext == ".csv":
+        with open(ruta, "w", encoding="utf-8", newline="") as fh:
+            for fila in filas:
+                fh.write(";".join(fila) + "\n")
+        return ruta
+    from openpyxl import Workbook
+
+    libro = Workbook()
+    for fila in filas:
+        libro.active.append(list(fila))
+    libro.save(ruta)
+    return ruta
+
+
+def probar_el_archivo_del_area_se_lee_con_encabezado():
+    """lo depuran a mano: llega como llega"""
+    from core import insumos
+
+    ruta = _archivo_insumos([("Servicio",), ("LIMPIEZA",), ("FLETES",)])
+    assert insumos.leer_archivo(ruta) == [("", "LIMPIEZA"), ("", "FLETES")]
+
+
+def probar_el_archivo_se_lee_aunque_no_traiga_encabezado():
+    """una lista de una sola columna es lo más común"""
+    from core import insumos
+
+    ruta = _archivo_insumos([("LIMPIEZA",), ("FLETES",)])
+    assert insumos.leer_archivo(ruta) == [("", "LIMPIEZA"), ("", "FLETES")]
+
+
+def probar_los_repetidos_del_archivo_no_entran_dos_veces():
+    """una lista depurada a mano suele traerlos"""
+    from core import insumos
+
+    ruta = _archivo_insumos([("Insumo",), ("LIMPIEZA",), ("limpieza",),
+                             ("FLETES",)])
+    assert insumos.leer_archivo(ruta) == [("", "LIMPIEZA"), ("", "FLETES")]
+
+
+def probar_el_catalogo_tambien_entra_por_csv():
+    """no siempre lo entregan en Excel"""
+    from core import insumos
+
+    ruta = _archivo_insumos([("Servicio",), ("LIMPIEZA",)], ext=".csv")
+    assert insumos.leer_archivo(ruta) == [("", "LIMPIEZA")]
+
+
+def _plantilla_con(conceptos_lista, insumos_lista):
+    """Genera la plantilla con esos dos catálogos y la devuelve abierta."""
+    import tempfile
+
+    from openpyxl import load_workbook
+
+    from core import insumos as cat_insumos
+    from core import plantilla_excel
+
+    for nombre in conceptos_lista:
+        conceptos.guardar(nombre)
+    cat_insumos.importar(insumos_lista, reemplazar=True)
+    ruta = os.path.join(tempfile.mkdtemp(), "plantilla.xlsx")
+    plantilla_excel.generar(ruta)
+    return load_workbook(ruta)
+
+
+def _validacion_de(hoja, columna):
+    for dv in hoja.data_validations.dataValidation:
+        if any(str(r).startswith(columna) for r in dv.sqref.ranges):
+            return dv.formula1 or ""
+    return ""
+
+
+def probar_la_plantilla_ofrece_insumos_solo_al_proveedor():
+    """SIPP le pide Insumos & Servicios al Proveedor y conceptos a los demás"""
+    # Ofrecer las dos listas juntas invita a elegir de la equivocada, y un
+    # renglón de la clase que no toca no falla al capturarlo: falla a media
+    # corrida, cuando el robot no lo encuentra en la pestaña del portal.
+    libro = _plantilla_con(["PAGO IMSS"], ["LIMPIEZA"])
+    formula = _validacion_de(libro["Solicitudes"], "P")
+    assert "INDIRECT" in formula, "la lista tiene que depender de otra celda"
+    assert '$D2="Proveedor"' in formula, "y esa celda es el tipo de beneficiario"
+    assert "_INSUMOS" in formula and "_CONCEPTOS" in formula
+
+
+def probar_en_el_desglose_la_lista_depende_de_la_clase_del_renglon():
+    """en la hoja Partidas lo que manda es si el renglón es concepto o insumo"""
+    libro = _plantilla_con(["PAGO IMSS"], ["LIMPIEZA"])
+    formula = _validacion_de(libro["Partidas"], "C")
+    assert '$B2="Insumo"' in formula
+
+
+def probar_las_dos_listas_viajan_en_la_plantilla():
+    """el desplegable las lee de ahí: sin ellas no hay de dónde elegir"""
+    libro = _plantilla_con(["PAGO IMSS"], ["LIMPIEZA"])
+    assert "_CONCEPTOS" in libro.defined_names
+    assert "_INSUMOS" in libro.defined_names
+    cat = libro["Catálogos"]
+    encabezados = [cat.cell(row=2, column=i).value for i in range(1, 15)]
+    assert "conceptos" in encabezados and "insumos" in encabezados
+
+
+def probar_sin_catalogo_de_insumos_la_columna_no_se_queda_sin_lista():
+    """mientras el área depura su catálogo, la plantilla tiene que servir igual"""
+    from core import insumos as cat_insumos
+
+    cat_insumos.vaciar()
+    libro = _plantilla_con(["PAGO IMSS"], [])
+    formula = _validacion_de(libro["Solicitudes"], "P")
+    assert formula, "sin insumos, al menos los conceptos de siempre"
+    assert "INDIRECT" not in formula, "no se puede alternar con una sola lista"
+
+
+# --------------------------------------------------------------------------- #
+#  El folio del insumo
+# --------------------------------------------------------------------------- #
+# SIPP busca el insumo por folio o por nombre. Por folio es exacto; los nombres
+# del catálogo del área son larguísimos y se parecen entre sí —«… MANGUERAS DE
+# COMBUSTIBLE DE GASOLINA» y «… DIESEL»—, así que buscar por nombre puede
+# devolver varios y elegir mal.
+def probar_el_archivo_con_folio_y_nombre_se_lee_entero():
+    """es como lo entrega el área y como lo pide SIPP"""
+    from core import insumos
+
+    ruta = _archivo_insumos([("Folio Insumo", "Nombre Insumo"),
+                             ("1024", "LIMPIEZA DE OFICINAS"),
+                             ("2048", "FLETES FORANEOS")])
+    assert insumos.leer_archivo(ruta) == [("1024", "LIMPIEZA DE OFICINAS"),
+                                          ("2048", "FLETES FORANEOS")]
+
+
+def probar_sin_encabezado_el_folio_se_reconoce_por_su_forma():
+    """códigos cortos y sin espacios a la izquierda del nombre"""
+    from core import insumos
+
+    ruta = _archivo_insumos([("1024", "LIMPIEZA DE OFICINAS"),
+                             ("2048", "FLETES FORANEOS")])
+    assert insumos.leer_archivo(ruta) == [("1024", "LIMPIEZA DE OFICINAS"),
+                                          ("2048", "FLETES FORANEOS")]
+
+
+def probar_una_lista_de_una_sola_columna_sigue_siendo_el_nombre():
+    """el caso más común, y no puede confundirse con un folio"""
+    from core import insumos
+
+    ruta = _archivo_insumos([("LIMPIEZA DE OFICINAS",), ("FLETES FORANEOS",)])
+    assert insumos.leer_archivo(ruta) == [("", "LIMPIEZA DE OFICINAS"),
+                                          ("", "FLETES FORANEOS")]
+
+
+def probar_el_folio_que_excel_guardo_como_numero_se_limpia():
+    """un «1024.0» no lo encuentra SIPP"""
+    from core import insumos
+
+    ruta = _archivo_insumos([("Folio", "Insumo"), ("1024.0", "LIMPIEZA")])
+    assert insumos.leer_archivo(ruta) == [("1024", "LIMPIEZA")]
+
+
+def probar_el_folio_se_guarda_y_se_puede_consultar():
+    """es lo que el robot le dará a SIPP para encontrarlo"""
+    from core import insumos
+
+    insumos.importar([("1024", "LIMPIEZA DE OFICINAS")], reemplazar=True)
+    assert insumos.clave_de("LIMPIEZA DE OFICINAS") == "1024"
+    # Y se encuentra aunque el nombre venga escrito de otra forma.
+    assert insumos.clave_de("limpieza de oficínas") == "1024"
+
+
+def probar_un_insumo_sin_folio_no_rompe_nada():
+    """el catálogo puede no traerlo: se busca por nombre, como antes"""
+    from core import insumos
+
+    insumos.importar(["LIMPIEZA DE OFICINAS"], reemplazar=True)
+    assert insumos.clave_de("LIMPIEZA DE OFICINAS") == ""

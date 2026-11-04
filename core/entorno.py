@@ -29,6 +29,13 @@ VAR_GITHUB_PAT = "QUETZALTIC_GITHUB_PAT"
 # (Bearer) para autenticar las peticiones. Los consume core/api.py.
 VAR_API_BASE_URL = "QUETZALTIC_API_BASE_URL"
 VAR_API_TOKEN = "QUETZALTIC_API_TOKEN"
+# Ambiente de SIPP, SOLO para ensayar. La aplicación instalada trabaja siempre
+# contra producción (ver ui/configuracion.ambiente_actual); esta variable es la
+# única forma de apuntarla a stage, y existe para poder probar el robot sin
+# consumir folios reales. Se define a mano en el equipo de quien prueba —en el
+# sistema o en un .env, que no se versiona—, así que no puede colarse en un
+# release ni quedarse puesta sin que alguien la haya escrito.
+VAR_AMBIENTE_SIPP = "SIPP_AMBIENTE"
 
 _cargado = False
 
@@ -93,6 +100,11 @@ def obtener(nombre: str, por_defecto: str | None = None, requerido: bool = False
 def github_pat(requerido: bool = True) -> str | None:
     """PAT de GitHub para acceder al repositorio privado (AutoUpdater)."""
     return obtener(VAR_GITHUB_PAT, requerido=requerido)
+
+
+def ambiente_sipp() -> str:
+    """Ambiente de SIPP pedido para ensayar, o '' si nadie lo pidió."""
+    return (obtener(VAR_AMBIENTE_SIPP, "") or "").strip().upper()
 
 
 def api_base_url(requerido: bool = False) -> str | None:

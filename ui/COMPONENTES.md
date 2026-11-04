@@ -54,6 +54,9 @@ campo_opciones(etiqueta, opciones, *, valor=None, width=None, hint=None,
 
 buscador(hint, on_submit=None, width=420, *, expand=False, autofocus=False)
 CampoFecha(page, etiqueta, valor="", on_change=None, flotante=False)  # .control / .value
+
+CampoCatalogo(page, opciones, *, valor="", hint="", titulo="Elegir",
+              on_change=None, expand=False, width=None)   # .control / .value
 CampoEtiquetado(bloque, campo)                                       # .control / .value
 ```
 
@@ -80,6 +83,14 @@ desempaquetar la tupla sigue funcionando igual.
 Para formularios **dinámicos** usa `CampoEtiquetado`, que empaqueta el par en un
 objeto con `.control` y `.value` — mismo contrato que `CampoFecha`, así se guarda
 una sola referencia por campo (ver [captura_activo.py](captura_activo.py)).
+
+**Catálogos largos por `CampoCatalogo`, no por `Dropdown`.** Un desplegable
+—aunque sea `editable` y con `enable_filter`— despliega su lista SOBRE la
+pantalla: con el catálogo de insumos del área, más de dos mil entradas, tapa la
+ventana entera. `CampoCatalogo` deja el campo como disparador y abre el mismo
+buscador en modal que usan las celdas de tabla: se escribe, la lista se filtra y
+Enter elige la primera coincidencia. Acepta un `valor` que no esté entre las
+opciones, porque puede ser algo que el catálogo todavía no tiene.
 
 **Fechas siempre por calendario**, nunca un `TextField` tecleado: `CampoFecha`
 expone `.value` como `'DD/MM/AAAA'` (`comun.FORMATO_FECHA`).
