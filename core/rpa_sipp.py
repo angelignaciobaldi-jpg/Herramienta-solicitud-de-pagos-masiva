@@ -1626,12 +1626,23 @@ class FlujoSolicitudPago:
             s.page.wait_for_timeout(1000)
             modal = s.loc("ins.modal").first
             if modal.count() > 0 and modal.is_visible():
-                if insumo.insumo_id:
+                # POR FOLIO siempre que se tenga: el modal de SIPP acepta
+                # folio o nombre, y el folio identifica un insumo y solo uno.
+                # Los nombres del catálogo son larguísimos y se parecen entre
+                # sí —«… MANGUERAS DE COMBUSTIBLE DE GASOLINA» y «… DIESEL»—,
+                # así que buscar por nombre puede devolver varios.
+                por_folio = bool(insumo.insumo_id)
+                if por_folio:
                     s.llenar("ins.modal_folio", insumo.insumo_id,
                              f"Folio insumo {i}")
                 elif insumo.insumo_nombre:
                     s.llenar("ins.modal_nombre", insumo.insumo_nombre,
                              f"Insumo {i}")
+                s.anotar("insumos",
+                         f"Buscando «{insumo.insumo_nombre}» por "
+                         + (f"folio {insumo.insumo_id}" if por_folio
+                            else "nombre (el catálogo no trae su folio)"),
+                         "INFO" if por_folio else "WARN")
                 s.loc("ins.modal_buscar").first.click()
                 s.page.wait_for_timeout(1500)
                 filas = modal.locator(selectores.css("grid.filas"))
@@ -1639,6 +1650,16 @@ class FlujoSolicitudPago:
                     raise RequiereRevision(
                         f"El insumo «{insumo.insumo_nombre or insumo.insumo_id}» "
                         f"no existe en el catálogo de SIPP.")
+                # Con varias coincidencias no se adivina: aquí se elige QUÉ se
+                # está pagando, y quedarse con la primera es cómo un pago acaba
+                # cargado al servicio equivocado.
+                if filas.count() > 1 and not por_folio:
+                    s.diagnostico(f"insumo_{i}_ambiguo")
+                    raise RequiereRevision(
+                        f"«{insumo.insumo_nombre}» devuelve "
+                        f"{filas.count()} resultados en el catálogo de SIPP y "
+                        f"la solicitud no trae su folio. Carga el catálogo de "
+                        f"insumos con folios o indica cuál es.")
                 filas.first.dblclick()
                 s.page.wait_for_timeout(1200)
             s.cerrar_alertas()
@@ -1649,6 +1670,7 @@ class FlujoSolicitudPago:
                 raise ErrorRpa(
                     f"El insumo «{insumo.insumo_nombre or insumo.insumo_id}» no "
                     f"se agregó al grid: quedó con {grid.count()} renglón(es).")
+            self._importe_insumo(insumo, i)
         s.anotar("insumos", f"{grid.count()} renglón(es) en el grid")
         # Aviso, no error: a diferencia de los conceptos, no está confirmado
         # cómo deriva SIPP el total desde este grid. Se deja constancia y que lo
@@ -1663,6 +1685,36 @@ class FlujoSolicitudPago:
                      "WARN" if self._es_cero(actual) else "INFO")
         except Exception:  # noqa: BLE001 — informativo
             pass
+
+    def _importe_insumo(self, insumo: Partida, i: int) -> None:
+        """Escribe el importe en el renglón recién agregado.
+
+        El grid trae su propia columna de Importe y SIPP recalcula el total al
+        salir del campo (`actualizarImporteInsumos`). Sin esto los insumos
+        entraban sin importe y la solicitud se guardaba en $0, que es peor que
+        un error: se ve capturada y hay que cancelarla a mano.
+        """
+        s = self.s
+        campos = s.page.locator(
+            f"{selectores.css('ins.grid')} {selectores.css('ins.importe')}")
+        if campos.count() == 0:
+            s.anotar("insumos",
+                     f"El renglón {i} no tiene campo de importe; lo tendrá que "
+                     f"capturar una persona", "WARN")
+            return
+        campo = campos.last
+        try:
+            campo.click(timeout=10000)
+            campo.press("Control+a")
+        except Cancelado:
+            raise
+        except Exception:  # noqa: BLE001 — se intenta escribir igual
+            pass
+        # Se TECLEA, como en los conceptos: la directiva de moneda de SIPP
+        # necesita pulsaciones reales.
+        campo.type(f"{insumo.importe:.2f}", delay=30)
+        campo.press("Tab")              # el blur dispara el recálculo
+        s.page.wait_for_timeout(400)
 
     def _llenar_conceptos(self, conceptos: list[Partida]) -> None:
         """Captura los conceptos de pago y sus importes.

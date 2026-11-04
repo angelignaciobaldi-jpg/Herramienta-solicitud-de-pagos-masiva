@@ -743,7 +743,7 @@ navegación horizontal en el encabezado, fechas siempre por `comun.CampoFecha`.
 |---|---|
 | Solicitudes | Tabla maestro-detalle, toolbar del lote, altas (manual, carátulas, Excel), ejecución |
 | Documentos | Carga por arrastre, archivo o carpeta. Emparejamiento PDF/XML y de carátulas/Vo.Bo. |
-| Conceptos | Catálogo de conceptos de pago: importación desde SIPP y alta manual |
+| Catálogos | Los dos catálogos del desglose, en una pestaña cada uno: conceptos de pago (se importan de SIPP) e insumos y servicios (se carga el archivo depurado del área). Ambos paginados |
 | Bitácora | Historial por solicitud, capturas de pantalla, exportación |
 | Configuración | Credenciales, modo visible/headless, verificación de conexión, versión. El ambiente se muestra, no se elige |
 
@@ -781,6 +781,47 @@ que no encaje en ningún grupo cae en «sin procesar» en vez de desaparecer.
 `LLENADA` va con las de revisar —el formulario se llenó, pero espera a que
 alguien lo guarde— y no con las que no se intentaron.
 
+### Dos catálogos, según a quién se le paga
+
+SIPP no pide lo mismo a todos: a un **Proveedor** le pide Insumos & Servicios y
+a un **Deudor** o un **Acreedor**, Conceptos de Pago (`catalogos.clase_desglose`).
+Por eso son dos catálogos y no uno con etiquetas —el mismo texto puede estar en
+los dos sin ser lo mismo— y viven en tablas distintas: `concepto_pago` tiene
+índice único por nombre, y meter ahí los insumos obligaría a migrarlo.
+
+| | De dónde sale | A quién se le ofrece |
+|---|---|---|
+| **Conceptos de pago** (`core/conceptos.py`) | Se importan del portal, leyendo la pestaña de una empresa | Deudor y Acreedor |
+| **Insumos y servicios** (`core/insumos.py`) | El catálogo de SIPP es enorme y casi nada se solicita desde aquí: el área entrega una lista **depurada** y esa se carga | Proveedor |
+
+La plantilla de Excel **alterna la lista sola**: la columna del desglose ofrece
+insumos cuando el Tipo de beneficiario es Proveedor y conceptos en los demás
+casos, con un desplegable dependiente (`INDIRECT` sobre dos rangos con nombre).
+En la hoja Partidas el criterio es la clase del renglón. Ofrecer las dos listas
+juntas invita a elegir de la equivocada, y un renglón de la clase que no toca no
+falla al capturarlo: falla a media corrida, cuando el robot no lo encuentra en la
+pestaña que el portal muestra.
+
+Como Excel no revalida lo ya escrito, la plantilla avisa de que hay que **elegir
+el tipo de beneficiario antes que el concepto**: si se cambia después, lo elegido
+puede quedar de la lista que no toca.
+
+Recargar el catálogo de insumos **sustituye** por defecto en vez de acumular: lo
+que el área quitó de su lista tiene que dejar de ofrecerse.
+
+
+Los dos se administran en **una sola pantalla** (`ui/catalogos.py`), con una
+pestaña cada uno: para quien captura son lo mismo —la lista del desglose— y
+tenerlos separados obligaba a recordar en cuál de las dos secciones estaba cada
+cosa. La mitad común (búsqueda, paginación, alta manual, estados vacíos) vive en
+una vista base; cada catálogo pone solo su barra de acciones y cómo explica el
+origen de un renglón.
+
+Las dos listas se **paginan**, a 10, 50, 100 o 1000 registros: el catálogo de
+insumos del área pasa de dos mil entradas, y pintarlas todas manda al cliente
+miles de controles por cada tecla del buscador. El selector de tamaño está
+siempre; las flechas solo cuando hay más de una página.
+
 ### La pestaña de conceptos tiene dos versiones
 
 SIPP la cambió y las dos conviven —stage estrenó la nueva el **07/09/2026** y
@@ -797,6 +838,42 @@ La diferencia **no es cosmética**: en la versión nueva, clicar la última colu
 agregado. Y la importación del catálogo lee las opciones del desplegable cuando
 existe: leerlo del grid, como antes, devolvía CERO y la herramienta informaba de
 que la empresa no tenía conceptos asignados.
+
+### El insumo se busca por FOLIO
+
+SIPP no enseña los insumos en la pantalla: en la pestaña «Insumos & Servicios»
+hay un botón «+» que abre un modal de búsqueda **por folio o por nombre**, con
+su propia paginación. Se elige ahí y el renglón entra al grid, donde se le
+teclea el importe (`actualizarImporteInsumos` recalcula el total al salir del
+campo).
+
+El catálogo local guarda el **folio de cada insumo** (`insumo_servicio.clave`),
+que viene en el archivo del área, y el motor busca con él siempre que lo tenga:
+el folio identifica un insumo y solo uno. Los nombres del catálogo son
+larguísimos y se parecen entre sí —«… MANGUERAS DE COMBUSTIBLE DE GASOLINA» y
+«… DIESEL»—, así que buscar por nombre puede devolver varios.
+
+Cuando **no** hay folio se busca por nombre, se deja constancia en la bitácora y,
+si SIPP devuelve más de un resultado, la solicitud se manda a revisión en vez de
+quedarse con el primero: aquí se elige QUÉ se está pagando, y adivinar es cómo un
+pago acaba cargado al servicio equivocado.
+
+El folio se ve y se busca en la pantalla de Catálogos, para poder contrastarlo
+contra el portal.
+
+### El desglose se elige, no se teclea
+
+En el detalle de una solicitud, tanto el concepto de pago como el insumo se
+eligen en un **desplegable que filtra al escribir**, alimentado por su catálogo.
+El problema es el mismo en los dos: un nombre escrito a mano que no exista en
+SIPP no falla al capturarlo, falla a media corrida, cuando el robot no lo
+encuentra en la pestaña del portal.
+
+**El centro de costos y la cuenta contable no se editan ahí.** Se capturan desde
+la plantilla de Excel y desde la asignación masiva, que es donde se llenan de
+verdad —vienen iguales para todo un lote— y hacerlo renglón a renglón en el
+modal solo estorbaba. El dato sigue existiendo y se ve en el detalle de la fila
+de la tabla; guardar el modal no lo toca.
 
 ### Catálogo de conceptos de pago
 

@@ -16,64 +16,69 @@ import os
 
 import flet as ft
 
-from core import conceptos, db, documentos, validador
+from core import conceptos, db, documentos, insumos, validador
 from core.catalogos import (FORMA_PAGO_CON_CUENTA, FORMAS_PAGO, MONEDAS,
                             SUCURSALES, TIPOS_BENEFICIARIO, TIPOS_GASTO,
                             TIPO_PAGO_SOPORTADO, clase_desglose)
 from core.db import CONCEPTO, INSUMO, Partida, Solicitud
 from core.empresas import NOMBRES_EMPRESAS
 from ui.comun import GRIS, NARANJA, ROJO, VERDE, fmt_importe, parse_importe
-from ui.componentes import (CampoFecha, Modal, boton_herramienta,
+from ui.componentes import (CampoCatalogo, CampoFecha, Modal,
+                            boton_herramienta,
                             boton_primario, boton_secundario, campo_opciones,
                             campo_texto, icono_accion, seccion_formulario)
 
 
 class _RenglonPartida:
-    """Un renglón editable del desglose. Los campos visibles dependen de la
-    clase: un concepto solo lleva nombre e importe; un insumo lleva además
-    centro de costos y cuenta contable, que es lo que pide su grid en SIPP."""
+    """Un renglón editable del desglose: qué se paga y cuánto.
 
-    def __init__(self, clase: str, partida: Partida | None, al_cambiar,
+    Los dos catálogos se ofrecen igual —un desplegable que filtra al escribir—
+    porque el problema es el mismo en los dos: un nombre escrito a mano que no
+    exista en SIPP no falla al capturarlo, falla a media corrida, cuando el
+    robot no lo encuentra en la pestaña del portal.
+
+    **Centro de costos y cuenta contable no están aquí.** Se capturan desde la
+    plantilla de Excel y desde la asignación masiva, que es donde se llenan de
+    verdad —vienen iguales para todo un lote— y llenarlos renglón a renglón en
+    este modal solo estorbaba.
+    """
+
+    def __init__(self, page, clase: str, partida: Partida | None, al_cambiar,
                  al_quitar) -> None:
+        self.page = page
         self.clase = clase
         self.partida = partida or Partida(clase=clase)
         self._al_cambiar = al_cambiar
 
+        # Desplegable EDITABLE con el catálogo local: elegir en vez de teclear,
+        # pero sin impedir escribir algo que aún no se ha cargado.
         if clase == CONCEPTO:
-            # Desplegable EDITABLE con el catálogo local: elegir en vez de
-            # teclear evita el error que más caro sale —un concepto mal escrito
-            # no falla al capturarlo, falla a media corrida—, pero sigue
-            # permitiendo escribir uno que aún no se ha importado.
-            catalogo = conceptos.nombres()
-            # El concepto que ya trae la partida entra como opción si el
-            # catálogo no lo tiene. Un `Dropdown` cuyo `value` no está entre sus
-            # opciones se pinta VACÍO, y al guardar devolvía vacío: abrir una
-            # solicitud importada y darle a guardar le borraba el concepto sin
-            # que nada lo dijera. Pasa siempre que el catálogo no se ha
-            # importado, y pasaba también con el mismo concepto escrito con
-            # acentos (reportado el 27/08/2026).
-            # Y se enseña como lo tiene SIPP: una solicitud importada antes
-            # de este arreglo trae el concepto con los acentos del Excel, y
-            # verlo escrito de otra forma que en el portal invita a «corregirlo»
-            # a mano.
-            puesto = conceptos.canonico(self.partida.concepto_nombre)
-            if puesto and puesto not in catalogo:
-                catalogo = [puesto] + catalogo
-            self.tf_nombre = ft.Dropdown(
-                options=[ft.DropdownOption(key=n, text=n) for n in catalogo],
-                editable=True, enable_filter=True, expand=True,
-                hint_text=("Concepto de pago (elige o escribe)" if catalogo
-                           else "Concepto de pago — el catálogo está vacío"),
-                value=puesto or None)
-            extras: list[ft.Control] = []
+            modulo, etiqueta = conceptos, "Concepto de pago"
+            valor = self.partida.concepto_nombre
         else:
-            _, self.tf_nombre = campo_texto(hint="Insumo o servicio", expand=True)
-            self.tf_nombre.value = self.partida.insumo_nombre
-            _, self.tf_centro = campo_texto(hint="Centro de costos", width=150)
-            self.tf_centro.value = self.partida.centro_costos
-            _, self.tf_cuenta = campo_texto(hint="Cuenta contable", width=150)
-            self.tf_cuenta.value = self.partida.cuenta_contable
-            extras = [self.tf_centro, self.tf_cuenta]
+            modulo, etiqueta = insumos, "Insumo o servicio"
+            valor = self.partida.insumo_nombre
+        catalogo = modulo.nombres()
+        # Lo que ya trae la partida entra como opción si el catálogo no lo
+        # tiene. Un `Dropdown` cuyo `value` no está entre sus opciones se pinta
+        # VACÍO, y al guardar devolvía vacío: abrir una solicitud importada y
+        # darle a guardar le borraba el concepto sin que nada lo dijera. Pasa
+        # siempre que el catálogo no se ha cargado, y pasaba también con el
+        # mismo nombre escrito con acentos (reportado el 27/08/2026).
+        # Y se enseña como lo tiene SIPP: una solicitud importada antes de ese
+        # arreglo trae los acentos del Excel, y verlo escrito de otra forma que
+        # en el portal invita a «corregirlo» a mano.
+        puesto = modulo.canonico(valor)
+        if puesto and puesto not in catalogo:
+            catalogo = [puesto] + catalogo
+        # Se elige BUSCANDO en un modal, no en un desplegable: el catálogo de
+        # insumos pasa de dos mil entradas y su lista tapaba la ventana entera.
+        self.tf_nombre = CampoCatalogo(
+            page, catalogo, valor=puesto, titulo=etiqueta,
+            hint=(f"{etiqueta} (pulsa para buscar)" if catalogo
+                  else f"{etiqueta} — el catálogo está vacío"),
+            on_change=lambda _v: self._al_cambiar(), expand=True)
+        extras: list[ft.Control] = []
 
         _, self.tf_importe = campo_texto(hint="0.00", width=130,
                                          on_blur=self._importe_editado)
@@ -82,7 +87,7 @@ class _RenglonPartida:
         self.tf_importe.text_align = ft.TextAlign.RIGHT
 
         self.control = ft.Row(
-            [self.tf_nombre, *extras, self.tf_importe,
+            [self.tf_nombre.control, *extras, self.tf_importe,
              ft.IconButton(ft.Icons.DELETE_OUTLINE, icon_size=18,
                            tooltip="Quitar este renglón",
                            icon_color=ft.Colors.ERROR,
@@ -104,15 +109,22 @@ class _RenglonPartida:
             p.concepto_nombre = (self.tf_nombre.value or "").strip()
         else:
             p.insumo_nombre = (self.tf_nombre.value or "").strip()
-            p.centro_costos = (self.tf_centro.value or "").strip()
-            p.cuenta_contable = (self.tf_cuenta.value or "").strip()
+            # El folio con el que el robot lo buscará en SIPP. Se relee del
+            # catálogo en vez de conservarlo: si se cambió el insumo del
+            # renglón, el folio de antes apuntaría a otro servicio.
+            p.insumo_id = insumos.clave_de(p.insumo_nombre)
+        # El centro de costos y la cuenta contable NO se tocan: ya no se editan
+        # aquí, y asignarles lo que hubiera en pantalla —nada— borraría lo que
+        # trajera la solicitud del Excel o de la asignación masiva.
         return p
 
 
 class _EditorPartidas:
     """Lista de renglones de una clase, con su botón de agregar y su total."""
 
-    def __init__(self, clase: str, titulo: str, ayuda: str, al_cambiar) -> None:
+    def __init__(self, page, clase: str, titulo: str, ayuda: str,
+                 al_cambiar) -> None:
+        self.page = page
         self.clase = clase
         self._al_cambiar = al_cambiar
         self.renglones: list[_RenglonPartida] = []
@@ -146,7 +158,8 @@ class _EditorPartidas:
 
     def agregar(self, partida: Partida | None = None,
                 refrescar: bool = True) -> None:
-        r = _RenglonPartida(self.clase, partida, self.recalcular, self.quitar)
+        r = _RenglonPartida(self.page, self.clase, partida,
+                            self.recalcular, self.quitar)
         self.renglones.append(r)
         self._lista.controls.append(r.control)
         if refrescar:
@@ -275,7 +288,7 @@ class CapturaSolicitud:
         # SIPP enseña la pestaña de Conceptos de Pago a Deudores y Acreedores, y
         # la de Insumos & Servicios a Proveedores. Nunca las dos.
         self.ed_conceptos = _EditorPartidas(
-            CONCEPTO, "Conceptos de pago",
+            self.page, CONCEPTO, "Conceptos de pago",
             "El importe de la solicitud lo calcula SIPP sumando los conceptos "
             "seleccionados: 'Cantidad a Pagar' está deshabilitado en Pago "
             "Extraordinario. Sin conceptos, la solicitud se guardaría en $0. "
@@ -283,10 +296,11 @@ class CapturaSolicitud:
             "escribir uno que no esté.",
             self._recalcular_total)
         self.ed_insumos = _EditorPartidas(
-            INSUMO, "Insumos y servicios",
-            "Desglose de lo que se compró, con su centro de costos y cuenta "
-            "contable. Es el mecanismo que SIPP usa con los Proveedores, en "
-            "lugar de los conceptos de pago.",
+            self.page, INSUMO, "Insumos y servicios",
+            "Desglose de lo que se compró. Es el mecanismo que SIPP usa con "
+            "los Proveedores, en lugar de los conceptos de pago. El centro de "
+            "costos y la cuenta contable se llenan desde el Excel o con la "
+            "asignación masiva, donde vienen iguales para todo el lote.",
             self._recalcular_total)
 
         self.txt_total = ft.Text("$0.00", size=20, weight=ft.FontWeight.BOLD)

@@ -16,7 +16,7 @@ import asyncio
 
 import flet as ft
 
-from core import credenciales, preferencias
+from core import credenciales, entorno, preferencias
 from core.catalogos import AMBIENTE_DEFECTO, AMBIENTES
 from core.version import __version__
 from ui.comun import GRIS, NARANJA, VERDE
@@ -32,14 +32,23 @@ CLAVE_VISIBLE = "navegador_visible"
 
 
 def ambiente_actual() -> str:
-    """Ambiente contra el que trabaja la herramienta. Siempre el mismo.
+    """Ambiente contra el que trabaja la herramienta: producción, salvo ensayo.
 
     **No se lee de las preferencias a propósito.** Antes se podía elegir, y esa
     elección quedaba guardada en el equipo: bastaba con haberla dejado en
     pruebas una vez para que un lote entero se capturara contra stage sin que
     nada lo delatara salvo un indicador que ya nadie mira. Devolverlo fijo
     también corrige de una vez los equipos que quedaron con el valor viejo.
+
+    La única excepción es la variable de entorno `SIPP_AMBIENTE`, para poder
+    ensayar el robot sin consumir folios reales. No es el selector de antes: hay
+    que escribirla a mano en el equipo —o en un `.env`, que no se versiona ni
+    viaja en el instalador—, así que no puede colarse en un release ni quedarse
+    puesta sin que alguien la haya puesto. Y el encabezado lo enseña.
     """
+    pedido = entorno.ambiente_sipp()
+    if pedido and pedido in AMBIENTES:
+        return pedido
     return AMBIENTE_DEFECTO
 
 
@@ -86,12 +95,20 @@ class SeccionConfiguracion:
         bl_contrasena, self.tf_contrasena = campo_texto(
             "Contraseña", password=True, expand=True)
 
+        # El rótulo se calcula: si alguien puso la herramienta a ensayar, el
+        # modal no puede seguir diciendo que trabaja contra producción.
+        produccion = ambiente_actual() == "PRODUCCION"
         self.txt_ambiente = ft.Text(
-            "PRODUCCIÓN", size=15, weight=ft.FontWeight.BOLD, color=NARANJA)
+            "PRODUCCIÓN" if produccion else "PRUEBAS",
+            size=15, weight=ft.FontWeight.BOLD,
+            color=NARANJA if produccion else VERDE)
         self.txt_url = ft.Text(url_login(), size=12, color=GRIS)
         self.txt_aviso_prod = ft.Text(
-            "Cada solicitud que el robot guarde consume un folio real.",
-            size=12, color=NARANJA, weight=ft.FontWeight.BOLD)
+            "Cada solicitud que el robot guarde consume un folio real."
+            if produccion else
+            "Ambiente de ensayo: lo que se capture aquí no es real.",
+            size=12, color=NARANJA if produccion else VERDE,
+            weight=ft.FontWeight.BOLD)
 
         self.chk_visible = ft.Checkbox(
             label="Mostrar el navegador mientras trabaja el robot",

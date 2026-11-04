@@ -262,6 +262,65 @@ _FECHA_MIN = datetime(1990, 1, 1)
 _FECHA_MAX = datetime(2100, 12, 31)
 
 
+class CampoCatalogo:
+    """Campo para elegir de un catálogo LARGO, buscando en un modal.
+
+    Un `ft.Dropdown`, por muy filtrable que sea, despliega su lista sobre la
+    pantalla: con el catálogo de insumos del área —más de dos mil entradas— tapa
+    la ventana entera y hay que recorrerla a ciegas (reportado el 10/09/2026).
+    Aquí el campo es solo el disparador; al pulsarlo abre el mismo buscador que
+    usan las celdas de tabla: escribe, la lista se filtra y Enter elige la
+    primera coincidencia.
+
+    Expone `.control` y `.value`, el mismo contrato que `CampoFecha` y
+    `CampoEtiquetado`, para que un formulario trate todos sus campos por igual.
+
+        c = CampoCatalogo(page, insumos.nombres(), hint="Insumo o servicio")
+        fila.controls.append(c.control)
+        elegido = c.value
+
+    `valor` se acepta aunque no esté entre las opciones: puede ser algo que el
+    catálogo todavía no tiene, y perderlo al abrir el formulario sería peor.
+    """
+
+    def __init__(self, page, opciones, *, valor: str = "", hint: str = "",
+                 titulo: str = "Elegir", on_change=None,
+                 expand: bool = False, width: int | None = None) -> None:
+        self.page = page
+        self.opciones = list(opciones)
+        self.titulo = titulo
+        self._on_change = on_change
+        self.campo = _estilo_campo(ft.TextField(
+            value=valor or "", read_only=True, hint_text=hint,
+            expand=expand, width=width,
+            suffix=icono_accion(ft.Icons.SEARCH, f"Buscar {titulo.lower()}",
+                                self._abrir)))
+        # El campo entero abre el buscador, no solo la lupa: es lo que se espera
+        # al ver algo con pinta de desplegable, y el área de la lupa es pequeña.
+        self.control = ft.Container(self.campo, on_click=self._abrir,
+                                    expand=expand, width=width)
+
+    @property
+    def value(self) -> str:
+        return self.campo.value or ""
+
+    @value.setter
+    def value(self, v: str) -> None:
+        self.campo.value = v or ""
+
+    def _abrir(self, _e=None) -> None:
+        if not self.opciones:
+            return
+        _dialogo_opciones(self.page, self.opciones, self.titulo,
+                          self.campo.value or "", self._elegido)
+
+    def _elegido(self, opcion: str) -> None:
+        self.campo.value = opcion
+        _refrescar(self.campo)
+        if callable(self._on_change):
+            self._on_change(opcion)
+
+
 class CampoFecha:
     """Campo de fecha por CALENDARIO. Estándar del proyecto: las fechas NUNCA
     se teclean, para no depender del formato que escriba cada quien.

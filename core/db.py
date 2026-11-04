@@ -238,6 +238,24 @@ _TABLAS: dict[str, dict[str, str]] = {
         "nota": "TEXT NOT NULL DEFAULT ''",
         "creado_en": "TEXT NOT NULL DEFAULT ''",
     },
+    # Catálogo de insumos y servicios. Va aparte de `concepto_pago` y no como
+    # una columna suya porque esa tabla tiene índice único POR NOMBRE, y el mismo
+    # texto puede existir en los dos catálogos sin ser lo mismo: SIPP los pide en
+    # pestañas distintas —Conceptos de Pago a Deudor y Acreedor, Insumos &
+    # Servicios a Proveedor— y quien captura elige uno u otro según a quién se le
+    # paga, no según cómo se llame.
+    "insumo_servicio": {
+        "id": "TEXT PRIMARY KEY",
+        "nombre": "TEXT NOT NULL DEFAULT ''",
+        # Folio del insumo EN SIPP. El portal busca por folio o por nombre, y
+        # por folio es exacto: los nombres del catálogo son larguísimos y se
+        # parecen entre sí, así que si se tiene, se usa.
+        "clave": "TEXT NOT NULL DEFAULT ''",
+        "empresa": "TEXT NOT NULL DEFAULT ''",        # informativo, no es clave
+        "origen": "TEXT NOT NULL DEFAULT 'MANUAL'",   # 'SIPP' | 'MANUAL'
+        "nota": "TEXT NOT NULL DEFAULT ''",
+        "creado_en": "TEXT NOT NULL DEFAULT ''",
+    },
     # Copia del estado de un lote antes de una operación masiva, para poder
     # deshacerla. Se guarda como JSON: es un respaldo puntual, no algo que se
     # consulte, y no vale la pena normalizarlo en tablas.
@@ -282,6 +300,9 @@ _INDICES = [
     # catálogo es una lista única para todo el grupo.
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_concepto_nombre "
     "ON concepto_pago(nombre)",
+    # Mismo criterio para los insumos: una lista única para todo el grupo.
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_insumo_nombre "
+    "ON insumo_servicio(nombre)",
 ]
 
 

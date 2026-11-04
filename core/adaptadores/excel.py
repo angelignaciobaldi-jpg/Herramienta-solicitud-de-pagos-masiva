@@ -24,7 +24,8 @@ import re
 from dataclasses import dataclass, field
 from datetime import date, datetime
 
-from core import catalogos, conceptos as cat_conceptos, validador
+from core import (catalogos, conceptos as cat_conceptos,
+                  insumos as cat_insumos, validador)
 from core.db import CONCEPTO, INSUMO, Partida, Solicitud, total_desglose
 from core.plantilla_excel import (CAMPOS, CAMPOS_PARTIDA, HOJA_PARTIDAS,
                                   HOJA_SOLICITUDES, _normalizar,
@@ -319,7 +320,11 @@ def _partidas_por_referencia(ruta: str) -> dict[str, list[Partida]]:
             if clase == CONCEPTO:
                 partida.concepto_nombre = cat_conceptos.canonico(nombre)
             else:
-                partida.insumo_nombre = nombre
+                partida.insumo_nombre = cat_insumos.canonico(nombre)
+                # El folio del catálogo, si lo tiene: es con lo que el robot
+                # busca el insumo en SIPP, y es exacto.
+                partida.insumo_id = (partida.insumo_id
+                                     or cat_insumos.clave_de(nombre))
             agrupadas.setdefault(referencia, []).append(partida)
         return agrupadas
     finally:
@@ -416,10 +421,12 @@ def leer(ruta: str, lote_id: str = "", *,
                     # Se guarda como lo tiene SIPP, no como venía escrito: el
                     # Excel del área trae acentos que el catálogo no tiene, y
                     # con el texto crudo el concepto no casaba con ninguna
-                    # opción del desplegable.
+                    # opción del desplegable. Lo mismo para los insumos, que
+                    # tienen su propio catálogo depurado.
                     partida.concepto_nombre = cat_conceptos.canonico(nombre)
                 else:
-                    partida.insumo_nombre = nombre
+                    partida.insumo_nombre = cat_insumos.canonico(nombre)
+                    partida.insumo_id = cat_insumos.clave_de(nombre)
                 partidas = [partida]
 
             solicitud.importe_total = total_desglose(

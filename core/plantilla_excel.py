@@ -181,12 +181,20 @@ def _listas() -> dict[str, list[str]]:
         "si_no": ["Sí", "No"],
         "clases": ["Concepto", "Insumo"],
     }
+    from core import insumos as cat_insumos
+
     try:
         nombres = conceptos.nombres()
     except Exception:  # noqa: BLE001 — sin base todavía: plantilla sin lista
         nombres = []
     if nombres:
         listas["conceptos"] = nombres
+    try:
+        servicios = cat_insumos.nombres()
+    except Exception:  # noqa: BLE001 — sin base todavía: plantilla sin lista
+        servicios = []
+    if servicios:
+        listas["insumos"] = servicios
     return listas
 
 
@@ -317,8 +325,70 @@ def generar(destino: str, *, filas_ejemplo: bool = True) -> str:
         for j, valor in enumerate(valores, 3):
             cat.cell(row=j, column=i).value = valor
 
+    # Rangos CON NOMBRE para las dos listas del desglose. Hacen falta porque su
+    # desplegable no es fijo: cambia según lo que diga otra celda de la misma
+    # fila, y eso en Excel se resuelve con INDIRECT, que necesita un nombre —no
+    # se le puede pasar un rango escrito a mano—.
+    from openpyxl.workbook.defined_name import DefinedName
+
+    nombres_rango: dict[str, str] = {}
+    for lista, rango in (("conceptos", "_CONCEPTOS"), ("insumos", "_INSUMOS")):
+        if lista not in listas:
+            continue
+        letra = columnas_lista[lista]
+        n = len(listas[lista]) + 2
+        libro.defined_names.add(DefinedName(
+            rango, attr_text=f"'{HOJA_CATALOGOS}'!${letra}$3:${letra}${n}"))
+        nombres_rango[lista] = rango
+
+    def formula_dependiente(campo: Campo) -> "str | None":
+        """Desplegable que cambia de lista según otra celda de la misma fila.
+
+        SIPP no pide lo mismo a todos: a un Proveedor le pide Insumos &
+        Servicios y a un Deudor o un Acreedor, Conceptos de Pago. Ofrecer las
+        dos listas juntas invita a elegir de la equivocada, y un renglón de la
+        clase que no toca no falla al capturarlo: falla a media corrida, cuando
+        el robot no lo encuentra en la pestaña que el portal muestra.
+
+        Si falta uno de los dos catálogos no se puede alternar, así que se
+        devuelve None y la columna cae en el desplegable simple de siempre.
+        """
+        if len(nombres_rango) < 2:
+            return None
+        if campo.clave == "concepto_nombre":
+            letra = _letra_de(campos_de(campo), "tipo_beneficiario")
+            if not letra:
+                return None
+            return (f'=INDIRECT(IF(${letra}2="Proveedor",'
+                    f'"_INSUMOS","_CONCEPTOS"))')
+        if campo.clave == "nombre":
+            letra = _letra_de(campos_de(campo), "clase")
+            if not letra:
+                return None
+            return (f'=INDIRECT(IF(${letra}2="Insumo",'
+                    f'"_INSUMOS","_CONCEPTOS"))')
+        return None
+
+    def campos_de(campo: Campo) -> list[Campo]:
+        return CAMPOS_PARTIDA if campo in CAMPOS_PARTIDA else CAMPOS
+
+    def _letra_de(campos: list[Campo], clave: str) -> str:
+        for i, c in enumerate(campos, 1):
+            if c.clave == clave:
+                return get_column_letter(i)
+        return ""
+
     def validar(hoja, campos: list[Campo]) -> None:
         for col, campo in enumerate(campos, 1):
+            dependiente = formula_dependiente(campo)
+            if dependiente:
+                dv = DataValidation(type="list", formula1=dependiente,
+                                    allow_blank=True, showDropDown=False)
+                dv.showErrorMessage = False
+                hoja.add_data_validation(dv)
+                columna = get_column_letter(col)
+                dv.add(f"{columna}2:{columna}1000")
+                continue
             # Un catálogo puede no estar disponible —los conceptos vienen de la
             # base y puede estar vacía—: esa columna se queda sin desplegable,
             # que es mejor que ofrecer una lista falsa.
@@ -355,6 +425,12 @@ def generar(destino: str, *, filas_ejemplo: bool = True) -> str:
         ("   Empresa, Sucursal, Tipo de beneficiario, Forma de pago, Tipo de "
          "gasto y Moneda tienen lista de valores válidos. Un valor escrito a "
          "mano que no exista en SIPP hará fallar esa solicitud al capturarla.", ""),
+        ("   La columna «Concepto de pago o insumo» cambia de lista según el "
+         "Tipo de beneficiario: a un Proveedor le ofrece INSUMOS Y SERVICIOS, y "
+         "a un Deudor o un Acreedor, CONCEPTOS DE PAGO. Es lo que SIPP pide en "
+         "cada caso, así que elige el tipo de beneficiario ANTES que el "
+         "concepto: si lo cambias después, lo que ya elegiste puede quedar de "
+         "la lista que no toca.", ""),
         ("", ""),
         ("3. La CLABE y la fecha van como TEXTO.", "sub"),
         ("   Si Excel convierte la CLABE en número, pierde los ceros de la "
