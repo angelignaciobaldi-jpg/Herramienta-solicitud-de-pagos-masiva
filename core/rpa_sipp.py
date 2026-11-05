@@ -161,6 +161,9 @@ def preparar_archivo(ruta: str) -> str:
     comprimido. Devuelve la ruta original si no hacía falta tocar nada."""
     if not ruta or not os.path.isfile(ruta):
         return ruta
+    # Red para lo adjuntado antes de que el Vo.Bo. se convirtiera al
+    # registrarlo: una imagen pesada subida tal cual la rechaza SIPP.
+    ruta = documentos.asegurar_pdf(ruta)
     nombre = os.path.basename(ruta)
     limpio = _nombre_limpio(nombre)
     necesita_nombre = limpio != nombre
