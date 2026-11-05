@@ -1646,3 +1646,19 @@ def probar_sin_conceptos_y_sin_combo_no_se_captura_en_cero():
         assert False, "debió detenerse"
     except rpa_sipp.RequiereRevision as exc:
         assert "$0" in str(exc) or "vacío" in str(exc)
+
+
+# --------------------------------------------------------------------------- #
+# SIPP toma como extensión lo que hay tras el PRIMER punto del nombre. Una
+# carátula «CARAT MA.LILIANA RUIZ (1).pdf» le parecía de tipo «LILIANA…» y la
+# rechazaba con un aviso que tapaba el modal (producción, 05/11/2026).
+def probar_el_nombre_que_se_sube_no_lleva_mas_punto_que_el_de_la_extension():
+    """con un punto de más, SIPP lee mal la extensión y rechaza el archivo"""
+    limpio = rpa_sipp._nombre_limpio("CARAT MA.LILIANA RUIZ (1).pdf")
+    assert limpio.count(".") == 1, limpio
+    assert limpio.endswith(".pdf"), limpio
+
+
+def probar_el_nombre_que_se_sube_conserva_lo_legible():
+    """limpiar no es borrar: quien lo vea en SIPP tiene que reconocerlo"""
+    assert rpa_sipp._nombre_limpio("Carátula Peña.PDF") == "Caratula Pena.pdf"
