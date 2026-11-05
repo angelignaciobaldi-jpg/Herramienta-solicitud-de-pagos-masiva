@@ -366,15 +366,37 @@ def probar_al_registrar_la_caratula_queda_en_pdf():
     assert _es_pdf(doc.ruta)
 
 
-def probar_el_vobo_se_registra_tal_cual():
-    """el Vo.Bo. suele ser la captura del correo de autorización; SIPP la acepta"""
+def probar_el_vobo_en_imagen_tambien_queda_en_pdf():
+    """suele ser una foto de celular: en PDF se reduce y queda como lo demás"""
     import tempfile
 
     lote = comun.lote()
     s = db.guardar_solicitud(comun.solicitud(lote.id, "ANA LOPEZ"))
     ruta = _imagen(tempfile.mkdtemp(), "vobo.png")
     doc = documentos.registrar(s.id, ruta, documentos.TIPO_VOBO, lote.id)
-    assert doc is not None and doc.ruta == ruta
+    assert doc is not None
+    assert doc.ruta.lower().endswith(".pdf")
+    assert _es_pdf(doc.ruta)
+
+
+def probar_una_foto_grande_se_reduce_al_convertir():
+    """SIPP corta en 10 MB y el robot solo sabía comprimir PDFs"""
+    import tempfile
+
+    import pymupdf
+
+    ruta = os.path.join(tempfile.mkdtemp(), "vobo.png")
+    # Ruido: una imagen lisa se comprime sola y no probaría nada.
+    pix = pymupdf.Pixmap(pymupdf.csRGB, 4000, 3000,
+                         os.urandom(4000 * 3000 * 3), False)
+    pix.save(ruta)
+    salida = documentos.asegurar_pdf(ruta)
+    assert _es_pdf(salida)
+    assert os.path.getsize(salida) < os.path.getsize(ruta) / 3, (
+        os.path.getsize(salida), os.path.getsize(ruta))
+    with pymupdf.open(salida) as pdf:
+        lado = max(pdf[0].get_images(full=True)[0][2:4])
+    assert lado <= documentos._LADO_MAXIMO, lado
 
 
 # --------------------------------------------------------------------------- #

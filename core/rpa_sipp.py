@@ -79,11 +79,16 @@ def _mismo_texto(a: str, b: str) -> str:
 
 def _nombre_limpio(nombre_archivo: str) -> str:
     """Quita acentos, Ñ y caracteres especiales: SIPP no procesa bien esos
-    nombres y la subida falla sin decir por qué."""
+    nombres y la subida falla sin decir por qué.
+
+    Los PUNTOS del nombre también se van: SIPP toma como extensión lo que hay
+    tras el primero, así que «CARAT MA.LILIANA RUIZ (1).pdf» le parecía un
+    archivo de tipo «LILIANA RUIZ (1).pdf» y lo rechazaba (visto en producción
+    el 05/11/2026). Solo queda el punto de la extensión de verdad."""
     base, ext = os.path.splitext(nombre_archivo)
     b = unicodedata.normalize("NFKD", base)
     b = "".join(c for c in b if not unicodedata.combining(c))
-    b = re.sub(r"[^A-Za-z0-9 _.-]", "_", b)
+    b = re.sub(r"[^A-Za-z0-9 _-]", "_", b)
     b = re.sub(r"\s+", " ", b).strip(" ._-") or "archivo"
     return b + ext.lower()
 
@@ -161,6 +166,9 @@ def preparar_archivo(ruta: str) -> str:
     comprimido. Devuelve la ruta original si no hacía falta tocar nada."""
     if not ruta or not os.path.isfile(ruta):
         return ruta
+    # Red para lo adjuntado antes de que el Vo.Bo. se convirtiera al
+    # registrarlo: una imagen pesada subida tal cual la rechaza SIPP.
+    ruta = documentos.asegurar_pdf(ruta)
     nombre = os.path.basename(ruta)
     limpio = _nombre_limpio(nombre)
     necesita_nombre = limpio != nombre
@@ -796,6 +804,19 @@ class SesionSipp:
             # vez de contar cuatro segundos siempre. Una carátula de 200 KB
             # termina en menos de uno, y son dos documentos por solicitud.
             self.esperar_quieto(4000)
+            # Un archivo que SIPP no acepta (extensión, formato, tamaño) no
+            # se arregla reintentando, y su aviso rojo TAPA el resto del
+            # formulario: el siguiente clic se quedaba esperando el tope de
+            # 60 s contra la alerta. Se lee el aviso y se para con su texto.
+            aviso = self.texto_alertas()
+            if any(x in aviso for x in ("extensi", "formato", "permitid",
+                                         "tamaño", "tamano")):
+                self.diagnostico(f"archivo_rechazado_{etiqueta}")
+                self.cerrar_alertas()
+                raise RequiereRevision(
+                    f"SIPP rechazó «{etiqueta}» "
+                    f"({os.path.basename(ruta)}): "
+                    f"{' '.join(aviso.split())[:200]}")
             if not self.hay_error_sistema():
                 return
             self.anotar("subir", f"«{etiqueta}»: falló la subida "

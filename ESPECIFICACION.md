@@ -374,15 +374,18 @@ Se asignan de dos maneras, y ambas terminan en la tabla `documento`:
    López*), pero exige que **todas** las palabras del nombre estén presentes: un
    apellido de menos ya no es la misma persona.
 
-**La carátula siempre acaba en PDF.** Es lo que el área entrega al banco y lo
-que SIPP guarda como respaldo de la cuenta, pero llega a menudo como foto o
-captura de pantalla. Al registrarla —el único punto por el que pasan las dos
-vías de alta— una imagen se convierte a PDF (`documentos.asegurar_pdf`) y se
-guarda en `DATOS\caratulas`, no junto al original: suele venir de una carpeta
-compartida o de Descargas, donde no se debe escribir. Si la conversión falla se
-usa el original, porque quedarse sin carátula detiene la solicitud entera y un
-JPG no. El Vo.Bo. se registra tal cual: suele ser la captura del correo de
-autorización y SIPP la acepta.
+**La carátula y el Vo.Bo. siempre acaban en PDF.** La carátula es lo que el
+área entrega al banco y lo que SIPP guarda como respaldo de la cuenta; el Vo.Bo.
+suele ser una foto de celular o la captura del correo de autorización. Al
+registrarlos —el único punto por el que pasan todas las vías de alta— una imagen
+se convierte a PDF (`documentos.asegurar_pdf`) y se guarda en
+`DATOS\caratulas`, no junto al original: suele venir de una carpeta compartida
+o de Descargas, donde no se debe escribir. Al convertir, una imagen de más de
+2200 px por lado se reduce y se recomprime: una foto de 12 MB subida tal cual
+la rechaza SIPP (corta en 10 MB). Si la conversión falla se usa el original,
+porque quedarse sin carátula detiene la solicitud entera y un JPG no. El robot
+vuelve a aplicar la conversión al subir (`preparar_archivo`), para lo que se
+adjuntó antes de que el Vo.Bo. se convirtiera.
 
 La falta de carátula se avisa en tres momentos: al guardar la solicitud, en el
 detalle de su fila en la tabla, y en la confirmación previa a ejecutar el lote.
